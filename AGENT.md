@@ -2,6 +2,7 @@
 
 > 23 例样本（ypN0 vs ypN+）10x Genomics 单细胞 RNA-seq 分析，R/Seurat 工具链。
 > 项目根 = 本目录（`Rversion`）。
+> **维护者**：AI 助手（WorkBuddy）担任指定维护者，git 操作全部由其执行（见 `MAINTENANCE.md`）。
 
 ## 必读顺序
 1. **项目结构** → `PROJECT_STRUCTURE.md`
@@ -23,4 +24,5 @@
 | `agent_doc/` | 不同情况的注意事项（分子目录） |
 | `lessons/` | 以往犯过的错误沉淀 |
 | `PROJECT_STRUCTURE.md` | 完整项目结构描述 |
+| `MAINTENANCE.md` | 维护职责说明书（AI 为指定维护者） |
 | `Git使用规范.md` | Git 日常操作手册 |
