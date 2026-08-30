@@ -8,6 +8,7 @@
 #   03_extract_cd45.R          -> SECTION 03
 #   04_integration_clustering.R-> SECTION 04
 #   05_celltype_annotation.R   -> SECTION 05
+#   06_parameter_sweep.R        -> SECTION 06 (DIMS x RESOLUTIONS x UMAP 参数扫描)
 #
 # 本合并版的关键约定（详见同目录 README_merged.md）：
 #   1) 样本范围：仅处理 data/ 下 GSE203115_* 三个样本目录（SAMPLE_PREFIX）。
@@ -52,7 +53,16 @@ cat(sprintf("脚本目录: %s\n", script_dir))
 # 修正说明：原 01_initiation.R:34 写的是 file.path(script_dir, "..", "data")，
 # 少一级 ".."（脚本被移入子目录后失效）。本合并版统一用两级 ".."。
 DATA_DIR  <- file.path(script_dir, "..", "..", "data")        # 项目根 data/
-XLSX_PATH <- file.path(DATA_DIR, "样本分组信息.xlsx")         # 分组主表
+
+# 分组主表：不在源码中硬编码中文路径（R 在 GBK 区域下读取 UTF-8 源码会把中文文件名
+# 解析为乱码，导致 file.exists 报 "name too long"）。改用 list.files 按扩展名发现
+# （返回的是系统原生编码，可靠），并支持 XLSX_PATH 环境变量 / 命令行覆盖。
+XLSX_PATH <- Sys.getenv("XLSX_PATH", unset = "")
+if (!nzchar(XLSX_PATH) || !file.exists(XLSX_PATH)) {
+  cand <- list.files(DATA_DIR, pattern = "\\.xlsx$", full.names = TRUE, ignore.case = TRUE)
+  cand <- cand[!grepl("backup", cand, ignore.case = TRUE)]   # 排除 backup 目录
+  if (length(cand) >= 1) XLSX_PATH <- cand[1]
+}
 
 # 各段输出目录（各自独立子目录，避免 02/03 同名 pdf 冲突）
 OUT_01 <- file.path(script_dir, "output", "01_initiation")
@@ -73,8 +83,20 @@ RDS_05 <- file.path(OUT_05, "05_annotated.rds")
 # "01".."05" = 从该段开始（其前各段的 rds 需已存在）
 RESUME_FROM <- ""
 
-# ---- 样本范围（本次合并仅处理 GSE203115 子集）----
-SAMPLE_PREFIX <- "GSE203115"
+# ---- 提前停止开关（用于只跑前段生成中间 rds）----
+# ""      = 不提前停止（重头运行：01 -> 06 全程跑完）
+# "03"    = 跑到 SECTION 03 末尾保存 03_CD45_positive.rds 后停止
+STOP_AFTER <- ""
+
+# ---- 样本范围（重头运行：仅纳入 data/ 下以 "GSE" 开头的样本，即 GSE203115_*）----
+SAMPLE_PREFIX <- "GSE"
+
+# 允许命令行覆盖开关：Rscript merged.R STOP_AFTER=03   /   RESUME_FROM=03
+args <- commandArgs(trailingOnly = TRUE)
+for (a in args) {
+  if (grepl("^STOP_AFTER=", a)) STOP_AFTER <- sub("^STOP_AFTER=", "", a)
+  if (grepl("^RESUME_FROM=", a)) RESUME_FROM <- sub("^RESUME_FROM=", "", a)
+}
 
 # ---- 创建所有输出目录 ----
 for (d in c(OUT_01, OUT_02, OUT_03, OUT_04, OUT_05)) {
@@ -123,7 +145,7 @@ save_pdf <- function(p, file, w, h) {
 
 # 判断是否运行某段（依据 RESUME_FROM）
 run_from <- function(stage) {
-  order <- c("01", "02", "03", "04", "05")
+  order <- c("01", "02", "03", "04", "05", "06")
   if (RESUME_FROM == "") return(TRUE)
   idx_run   <- which(order == RESUME_FROM)
   idx_stage <- which(order == stage)
@@ -848,6 +870,11 @@ if (run_from("03")) {
   cat("  06_CD45_proportion_by_sample.pdf      - 各样本 CD45+ 比例柱状图\n")
   cat("  07_CD45_pos_neg_stack_by_sample.pdf    - 各样本 CD45+ / CD45- 堆叠柱状图\n")
   cat("\n03 extract_cd45 完成。\n")
+
+  if (STOP_AFTER %in% c("03")) {
+    cat(sprintf("\n*** STOP_AFTER=%s：已在 SECTION 03 后停止（已保存 03_CD45_positive.rds）。***\n", STOP_AFTER))
+    quit(save = "no")
+  }
 }
 
 
@@ -1716,9 +1743,192 @@ if (run_from("05")) {
 
 
 ## ====================================================================
+## SECTION 06 — PARAMETER SWEEP（DIMS × RESOLUTIONS × UMAP 参数扫描）
+##   读取 03_CD45_positive.rds（GSE203115 CD45+ 子集）->
+##   标准化/变量基因/缩放/PCA/Harmony(theta=5) ->
+##   对每个 DIMS 构建邻域图 -> 多分辨率聚类 -> 多 UMAP 嵌入 ->
+##   输出：每个 (DIMS, n.neighbors) 一个 PDF（6 页，每页一个 min.dist；
+##         每页 8 分辨率网格：上行 cluster 着色 / 下行 group 着色）
+##         + 1 份合成 sweep_combined.pdf（封面 + 全部网格页）
+##         + cluster_count_by_dims_resolution.csv
+##   运行：Rscript merged_pipeline_01_05.R RESUME_FROM=06
+## ====================================================================
+if (run_from("06")) {
+  cat(sprintf("\n########## SECTION 06 — PARAMETER SWEEP ##########\n"))
+
+  suppressPackageStartupMessages({
+    library(Seurat); library(dplyr); library(ggplot2)
+    library(patchwork); library(cowplot); library(harmony)
+  })
+
+  ## ---- 0. 扫描参数（用户指定）----
+  SWEEP_DIMS           <- c(10, 20, 30, 40, 50)
+  SWEEP_RESOLUTIONS    <- c(0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6)
+  SWEEP_UMAP_NEIGHBORS <- c(10, 25, 50, 100, 150)
+  SWEEP_UMAP_MIN_DIST  <- c(0.05, 0.1, 0.2, 0.4, 0.9, 1.5)
+
+  ## ---- 固定参数（沿用 SECTION 04 硬编码，保证可比）----
+  SWEEP_NFEATURES      <- 3000
+  SWEEP_REGRESS_MT     <- TRUE
+  SWEEP_NPCS           <- 50
+  SWEEP_HARMONY_THETA  <- 5
+  SWEEP_HARMONY_MAXITER<- 50
+  SWEEP_HARMONY_SIGMA  <- 0.1
+  SWEEP_UMAP_METHOD    <- "uwot"
+  SWEEP_UMAP_METRIC    <- "cosine"
+  SWEEP_UMAP_SPREAD    <- 1
+  SWEEP_SEED           <- 123
+
+  INPUT_RDS <- RDS_03
+  OUT_DIR   <- file.path(script_dir, "sweep_output")
+  dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+
+  if (!file.exists(INPUT_RDS)) {
+    stop("找不到 ", INPUT_RDS, "，请先运行 STOP_AFTER=03 生成（或准备 GSE203115 子集）。")
+  }
+  obj <- readRDS(INPUT_RDS)
+  cat(sprintf("读入: %d 基因 x %d 细胞\n", nrow(obj), ncol(obj)))
+  cat("分组分布:\n"); print(table(obj$group, useNA = "ifany"))
+
+  if (DefaultAssay(obj) != "RNA") DefaultAssay(obj) <- "RNA"
+  if (length(Layers(obj, assay = "RNA")) > 1) obj <- JoinLayers(obj, assay = "RNA")
+  if (!"sample" %in% colnames(obj@meta.data)) obj$sample <- as.character(obj$orig.ident)
+  grp_col <- if ("group" %in% colnames(obj@meta.data)) "group" else "orig.ident"
+
+  cat("标准化 / 变量基因 / 缩放 ...\n")
+  obj <- NormalizeData(obj, normalization.method = "LogNormalize", verbose = FALSE)
+  obj <- FindVariableFeatures(obj, selection.method = "vst", nfeatures = SWEEP_NFEATURES, verbose = FALSE)
+  if (SWEEP_REGRESS_MT) {
+    obj <- ScaleData(obj, vars.to.regress = "percent.mt", verbose = FALSE)
+  } else {
+    obj <- ScaleData(obj, verbose = FALSE)
+  }
+  cat("PCA ...\n")
+  obj <- RunPCA(obj, npcs = SWEEP_NPCS, verbose = FALSE)
+
+  if (requireNamespace("future", quietly = TRUE)) future::plan(future::sequential)
+  options(future.globals.maxSize = 8 * 1024^3)
+  set.seed(SWEEP_SEED)
+
+  total_combos <- length(SWEEP_DIMS) * length(SWEEP_RESOLUTIONS) *
+                  length(SWEEP_UMAP_NEIGHBORS) * length(SWEEP_UMAP_MIN_DIST)
+  cat(sprintf("总组合数 = %d DIMS x %d res x %d neighbors x %d min.dist = %d\n",
+              length(SWEEP_DIMS), length(SWEEP_RESOLUTIONS),
+              length(SWEEP_UMAP_NEIGHBORS), length(SWEEP_UMAP_MIN_DIST), total_combos))
+
+  # 流式生成（关键修复）：边计算边出图，绝不一次性把所有网格驻留内存。
+  # 原先把 150 页 wrap_plots（每页 16 个 DimPlot = 共 2400 个 ggplot 对象）全存进 all_pages，
+  # 再分别写入独立 PDF 与合成 PDF，峰值内存过高导致 R 段错误崩溃（日志块缓冲只刷到首个 UMAP）。
+  # 现改为：合成 PDF 设备常开，对每个 (D,n,d) 实时 UMAP+构图，立即双写（独立 PDF + 合成 PDF），
+  # 随后释放该 UMAP 嵌入，内存保持有界。
+  summ_rows <- list()
+  n_ind_pdf <- 0
+
+  comb_path <- file.path(OUT_DIR, "sweep_combined.pdf")
+  cat(sprintf("合成 %s ...\n", comb_path))
+  pdf(comb_path, width = 34, height = 13)
+  comb_dev  <- dev.cur()
+  p_title <- ggdraw()
+  p_title <- p_title + draw_text("DIMS x Resolution x UMAP 参数扫描",
+                  x = 0.5, y = 0.86, size = 22, hjust = 0.5, fontface = "bold")
+  p_title <- p_title + draw_text("数据: GSE203115 CD45+ 子集 (Harmony theta=5, cosine)",
+                  x = 0.5, y = 0.76, size = 12, hjust = 0.5)
+  p_title <- p_title + draw_text(paste0("DIMS            = ", paste(SWEEP_DIMS, collapse = ", ")),
+                  x = 0.5, y = 0.66, size = 12, hjust = 0.5)
+  p_title <- p_title + draw_text(paste0("RESOLUTIONS     = ", paste(SWEEP_RESOLUTIONS, collapse = ", ")),
+                  x = 0.5, y = 0.58, size = 12, hjust = 0.5)
+  p_title <- p_title + draw_text(paste0("UMAP_NEIGHBORS  = ", paste(SWEEP_UMAP_NEIGHBORS, collapse = ", ")),
+                  x = 0.5, y = 0.50, size = 12, hjust = 0.5)
+  p_title <- p_title + draw_text(paste0("UMAP_MIN_DIST   = ", paste(SWEEP_UMAP_MIN_DIST, collapse = ", ")),
+                  x = 0.5, y = 0.42, size = 12, hjust = 0.5)
+  p_title <- p_title + draw_text(paste0("共 ", length(SWEEP_DIMS) * length(SWEEP_UMAP_NEIGHBORS) * length(SWEEP_UMAP_MIN_DIST),
+                  " 个网格页 (DIMS x n.neighbors x min.dist)；每页上行=cluster 着色，下行=group 着色。"),
+                  x = 0.5, y = 0.32, size = 12, hjust = 0.5)
+  print(p_title)
+
+  for (D in SWEEP_DIMS) {
+    dims <- 1:D
+    cat(sprintf("\n--- DIMS = 1:%d ---\n", D))
+    cat("  Harmony 整合 (theta=5) ...\n")
+    obj <- RunHarmony(obj, group.by.vars = "sample", reduction.use = "pca",
+                      reduction.save = "harmony", theta = SWEEP_HARMONY_THETA,
+                      max_iter = SWEEP_HARMONY_MAXITER, sigma = SWEEP_HARMONY_SIGMA,
+                      verbose = FALSE)
+    cat("  FindNeighbors ...\n")
+    obj <- FindNeighbors(obj, reduction = "harmony", dims = dims, verbose = FALSE)
+
+    # 多分辨率聚类（同一邻域图，开销小）
+    for (r in SWEEP_RESOLUTIONS) {
+      obj <- FindClusters(obj, resolution = r, algorithm = 1, method = "igraph",
+                          group.singletons = TRUE, verbose = FALSE)
+      obj[[paste0("cluster_", r)]] <- as.character(obj$seurat_clusters)
+      summ_rows[[length(summ_rows) + 1]] <-
+        data.frame(dims = D, resolution = r,
+                   n_clusters = length(unique(obj@meta.data[[paste0("cluster_", r)]])))
+    }
+
+    # 流式：(n, d) 实时 UMAP + 构图 + 双写（独立 PDF 与合成 PDF）+ 释放嵌入
+    for (n in SWEEP_UMAP_NEIGHBORS) {
+      ind_name <- sprintf("sweep_D%d_n%d.pdf", D, n)
+      pdf(file.path(OUT_DIR, ind_name), width = 34, height = 13)
+      ind_dev  <- dev.cur()
+      for (d in SWEEP_UMAP_MIN_DIST) {
+        key <- paste0("umap_D", D, "_n", n, "_d", d)
+        # UMAP（cosine 失败则回退 euclidean，避免单点失败中断整轮扫描）
+        obj <- tryCatch({
+          RunUMAP(obj, reduction = "harmony", dims = dims,
+                  umap.method = SWEEP_UMAP_METHOD, metric = SWEEP_UMAP_METRIC,
+                  n.neighbors = n, min.dist = d, spread = SWEEP_UMAP_SPREAD,
+                  seed.use = SWEEP_SEED, reduction.name = key, verbose = FALSE)
+        }, error = function(e) {
+          cat(sprintf("  [warn] cosine UMAP 失败 (n=%d d=%s)：%s；回退 euclidean\n",
+                      n, d, conditionMessage(e)))
+          RunUMAP(obj, reduction = "harmony", dims = dims,
+                  n.neighbors = n, min.dist = d, spread = SWEEP_UMAP_SPREAD,
+                  seed.use = SWEEP_SEED, reduction.name = key, verbose = FALSE)
+        })
+        # 构建 8 分辨率网格（上行 cluster / 下行 group）
+        panels <- list()
+        for (r in SWEEP_RESOLUTIONS) {
+          res_col <- paste0("cluster_", r)
+          p_cl <- DimPlot(obj, reduction = key, group.by = res_col,
+                          label = TRUE, repel = TRUE, pt.size = 0.4) +
+                  NoLegend() + ggtitle(paste0("cluster | res=", r))
+          p_gr <- DimPlot(obj, reduction = key, group.by = grp_col,
+                          pt.size = 0.4) + NoLegend() + ggtitle("group")
+          panels[[paste0("c_", r)]] <- p_cl
+          panels[[paste0("g_", r)]] <- p_gr
+        }
+        ord  <- c(paste0("c_", SWEEP_RESOLUTIONS), paste0("g_", SWEEP_RESOLUTIONS))
+        grid <- wrap_plots(panels[ord], nrow = 2, ncol = 8) +
+                plot_annotation(title = paste0("DIMS=1:", D,
+                  "  |  UMAP n.neighbors=", n, "  min.dist=", d))
+        dev.set(ind_dev); print(grid)   # 写入独立 PDF
+        dev.set(comb_dev); print(grid)  # 写入合成 PDF
+        obj[[key]] <- NULL               # 释放嵌入，控制内存
+      }
+      dev.set(ind_dev); dev.off()       # 关闭独立 PDF，回到合成设备
+      n_ind_pdf <- n_ind_pdf + 1
+      cat(sprintf("  已保存独立 PDF: %s\n", ind_name))
+    }
+  }
+  dev.set(comb_dev); dev.off()
+  cat(sprintf("  已保存合成 PDF: %s\n", comb_path))
+
+  ## ---- 聚类数汇总 CSV（按 DIMS x resolution）----
+  summ_df <- do.call(rbind, summ_rows)
+  write.csv(summ_df, file.path(OUT_DIR, "cluster_count_by_dims_resolution.csv"), row.names = FALSE)
+
+  cat(sprintf("\n完成 SECTION 06：%d 个独立 PDF + 1 份合成 PDF (%s)\n",
+              n_ind_pdf, comb_path))
+  cat(sprintf("总组合数 = %d\n", total_combos))
+}
+
+
+## ====================================================================
 ## 全流程结束
 ## ====================================================================
-cat(sprintf("\n########## 合并流程 01->05 全部完成 ##########\n"))
+cat(sprintf("\n########## 合并流程 01->06 全部完成 ##########\n"))
 cat(sprintf("各段关键产物：\n"))
 cat(sprintf("  %s\n", RDS_01))
 cat(sprintf("  %s\n", RDS_02))

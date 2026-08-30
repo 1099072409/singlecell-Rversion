@@ -58,6 +58,7 @@ Rversion/00test/
 ├── README_merged.md            # 本文件
 ├── manual_markers.R            # 从 05 复制的经典 marker 字典（已内联进脚本，留作参照）
 ├── celltype_map.csv            # 从 05 复制的注释映射表（21 行，celltype 列待核定）
+├── sweep_output/               # SECTION 06 产物（见第七节）
 └── output/
     ├── 01_initiation/          # 01_seurat_combined.rds
     ├── 02_quality_control/     # 02_seurat_qc.rds + csv/pdf
@@ -101,6 +102,7 @@ Rversion/00test/
 
 ### ✅ 已修正
 - **01 `DATA_DIR` 路径 bug**：原 `01_initiation.R:34` 写 `file.path(script_dir, "..", "data")`，少一级 `..`（脚本被移入子目录后失效，指向不存在的 `Rversion/data`）。合并版统一为 `file.path(script_dir, "..", "..", "data")`，正确指向 `A:\Workbuddy\singlecell\data`。
+- **分组表中文路径 bug（Windows GBK 区域）**：原 `XLSX_PATH <- file.path(DATA_DIR, "样本分组信息.xlsx")` 把中文文件名**硬编码进 .R 源码**，R 在 GBK 区域下读取 UTF-8 源码会把中文解析为乱码，导致 `file.exists()` 报 `file name conversion problem -- name too long?`（本任务首次以 `STOP_AFTER=03` 跑 01–03 时即因此中断）。修复：改用 `list.files(DATA_DIR, pattern="\\.xlsx$")` 按扩展名发现（返回系统原生编码，可靠），并排除 `backup` 目录；同时支持 `XLSX_PATH` 环境变量/命令行覆盖。
 
 ### ⚠️ 刻意保留（不可"上提 CONFIG"，否则结果与原始流程不一致）
 - **04 三处硬编码**：
@@ -132,3 +134,55 @@ Rversion/00test/
 **资源提示**：机器 28GB 内存，单跑 04/05 约占用 8–13GB（加载 ~2.4GB rds 时峰值高），**不要并发跑两个 R**。
 
 **产物自查**：跑完后以 `output/03_extract_cd45/03_CD45_positive.rds` 等实际落盘文件为准，勿仅凭日志判断。
+
+---
+
+## 七、SECTION 06 参数扫描（DIMS × 分辨率 × UMAP）
+
+把"参数敏感性扫描"作为流程的第 6 段整合进同一脚本（single source of truth），复用 SECTION 04 的整合配方（Harmony `theta=5`、`DIMS` 覆盖、`cosine` 度量），对用户指定的四组参数做全排列组合。
+
+### 扫描参数（脚本顶部 `SWEEP_*`）
+| 参数 | 取值 |
+|---|---|
+| `SWEEP_DIMS` | `10, 20, 30, 40, 50`（本次新增，覆盖原 04 硬编码的 `1:30`） |
+| `SWEEP_RESOLUTIONS` | `0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6`（多分辨率聚类） |
+| `SWEEP_UMAP_NEIGHBORS` | `10, 25, 50, 100, 150`（`RunUMAP` n.neighbors） |
+| `SWEEP_UMAP_MIN_DIST` | `0.05, 0.1, 0.2, 0.4, 0.9, 1.5`（`RunUMAP` min.dist） |
+
+> **总组合数 = 5 × 8 × 5 × 6 = 1200** 个 UMAP/聚类配置。
+> 其中 UMAP 嵌入按 `DIMS × neighbors × min.dist = 5×5×6 = 150` 次实际计算（每次对应 8 个分辨率的聚类切割，开销极小）。
+
+### 复用 SECTION 04 的配方（保证可比）
+- 标准化 `LogNormalize` → `vst` 选 3000 HVG → `ScaleData(regress percent.mt)`
+- `RunPCA(npcs=50)`
+- `RunHarmony(theta=5, max.iter=50, sigma=0.1, group.by="sample")` → 降维空间 `harmony`
+- 对每个 `DIMS=D`：`FindNeighbors(reduction="harmony", dims=1:D)` → 8 分辨率 `FindClusters(algorithm=1, igraph, group.singletons=TRUE)` → 按 `n.neighbors×min.dist` 跑对应 `RunUMAP`
+
+### 产物（`sweep_output/`）
+| 文件 | 说明 |
+|---|---|
+| `sweep_D{D}_n{n}.pdf`（共 **25** 个 = 5 DIMS × 5 neighbors） | 每个 PDF 含 **6 页**（每页一个 `min.dist`），每页为 **8 分辨率网格**（4 列 × 2 行）：上行 cluster 着色（带标签）、下行 group（ypN0/ypN+）着色 |
+| `sweep_combined.pdf` | **合成一份**：封面（参数说明）+ 全部 150 个网格页（顺序 DIMS → neighbors → min.dist） |
+| `cluster_count_by_dims_resolution.csv` | 各 `(DIMS, resolution)` 的聚类数汇总，便于挑分辨率 |
+
+> "几十个 PDF" 对应 25 个独立 PDF；"合成一份" 对应 `sweep_combined.pdf`。
+
+### 输入来源（重要）
+SECTION 06 读取 `output/03_extract_cd45/03_CD45_positive.rds`。本任务中，因原 01–03 因中文路径 bug 中断，**改用全量 23 样本 `03_CD45_positive.rds`（`Rversion/03_extract_cd45/output/`）子集化出 GSE203115 部分**（一次性子集化辅助脚本，运行后已移除；5314 CD45+ 细胞：ypN0=3740、ypN+=1574，原始 `group`/`sample` 元数据随子集保留），效果等价于从 GSE203115 原始 10x 数据重跑 01–03。后续若已修复 xlsx 路径并重跑 01–03，直接覆盖该 rds 即可，无需改动 SECTION 06。
+
+### 运行（"带跑代码到这一步"）
+```bash
+# 重头运行（仅 GSE 开头样本，01 -> 06 全程）：STOP_AFTER="" 且 RESUME_FROM=""（默认值）
+"C:/Program Files/R/R-4.4.3/bin/Rscript.exe" "A:/Workbuddy/singlecell/Rversion/00test/merged_pipeline_01_05.R"
+
+# 仅跑 SECTION 06（需 03_CD45_positive.rds 已存在），RESUME_FROM=06 跳过 01–05
+"C:/Program Files/R/R-4.4.3/bin/Rscript.exe" "A:/Workbuddy/singlecell/Rversion/00test/merged_pipeline_01_05.R" RESUME_FROM=06
+
+# 仅重生成 03 rds 后停止：STOP_AFTER=03
+"C:/Program Files/R/R-4.4.3/bin/Rscript.exe" "A:/Workbuddy/singlecell/Rversion/00test/merged_pipeline_01_05.R" STOP_AFTER=03
+```
+
+> **实现要点（已修复崩溃）**：初版 SECTION 06 先把 150 页网格（每页 16 个 DimPlot，共 2400 个 ggplot 对象）全部驻留 `all_pages` 再统一出图，峰值内存爆掉导致 R 段错误崩溃。已改为**流式出图**——合成 PDF 设备常开，对每个 `(DIMS, n.neighbors, min.dist)` 实时 UMAP+构图、立即双写（独立 PDF + 合成 PDF）、随后释放该 UMAP 嵌入，内存保持有界；`RunUMAP` 加 `tryCatch`（cosine 失败回退 euclidean）。所有 UMAP 组合（含 `min.dist=1.5` + `spread=1`）经验证单独运行均正常，崩溃确为内存结构问题而非参数。
+
+> 资源：150 次 UMAP 计算在数千细胞规模下约数十分钟，建议在后台运行（见 `sweep_output/run_full_01_06.log`）。
+
