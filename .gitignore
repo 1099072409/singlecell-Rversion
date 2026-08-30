@@ -38,6 +38,9 @@
 Thumbs.db
 desktop.ini
 
+# ---------- 共享数据目录联接（worktree 中的 data junction → 上级 ../data）----------
+data/
+
 # ---------- 显式白名单（兜底，防止上面规则误伤）----------
 !*.R
 !*.r
