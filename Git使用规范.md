@@ -46,7 +46,7 @@ A:\Workbuddy\singlecell\                  ← 36 GB，不建议整体建库
 | `.log` 日志 | 8 | ~0 MB | ❌ 排除 |
 | `.Rhistory` | 5 | ~0 MB | ❌ 排除 |
 
-**入仓后仓库 0.74 MB**（实测：50 个文件入库，13.06 GB 被排除）。9 个 `.rds` 全部超过 GitHub 的 100 MB 硬限制，其中 4 个在 2.3 GB 以上——这不是"要不要优化"的问题，是"不排除就根本推不上去"的问题。
+**入仓后仓库 0.71 MB**（实测：52 个文件入库，13.06 GB 被排除）。9 个 `.rds` 全部超过 GitHub 的 100 MB 硬限制，其中 4 个在 2.3 GB 以上——这不是"要不要优化"的问题，是"不排除就根本推不上去"的问题。
 
 ### 1.3 你的 Git 环境现状（三项需要修正）
 
@@ -351,6 +351,23 @@ git commit -m "feat: 初始化单细胞 Seurat 分析流程（01-06 步骤脚本
 ```bash
 git log --oneline --stat
 ```
+
+> **⚠️ PowerShell 中中文提交信息的编码坑（重要）**
+> 在 PowerShell 里直接 `git commit -m "中文"` 很容易把中文按 GBK 存进提交对象，`git log` 里会变成 `?????` 或乱码。本项目已踩过这个坑并修好了。两种可靠做法：
+> 1. **推荐：在 Git Bash 里提交**（Git Bash 默认 UTF-8 locale，存储最干净）。
+> 2. **坚持用 PowerShell**：先在真实环境执行一次（仅需一次，永久生效）
+>    ```powershell
+>    git config --global i18n.commitEncoding utf-8
+>    git config --global i18n.logOutputEncoding utf-8
+>    ```
+>    再用**文件**传消息、并显式声明编码，避免被系统 ANSI 代码页替换成 `?`：
+>    ```powershell
+>    $enc = New-Object System.Text.UTF8Encoding($false)
+>    [IO.File]::WriteAllText("msg.txt", "feat: 你的中文提交信息", $enc)
+>    git -c i18n.commitEncoding=utf-8 commit --amend -F msg.txt
+>    Remove-Item msg.txt
+>    ```
+>    另外，即便存储是 UTF-8，PowerShell 控制台代码页默认是 GBK，`git log` 仍可能显示乱码——这是**显示问题不是存储问题**。想正常显示，先 `chcp 65001` 切到 UTF-8 代码页，或直接在 Git Bash 看。
 
 ### 5.4 提交信息规范（Conventional Commits）
 
@@ -717,14 +734,16 @@ git branch -vv                         # 分支与上游绑定关系
 
 ## 附录 C：本仓库资产清单
 
-**入库（实测 50 个文件 / 0.74 MB）**
+**入库（实测 52 个文件 / 0.71 MB，首次提交 `eaf78dc`→经 UTF-8 修正后为最终提交）**
 
 | 类型 | 数量 | 说明 |
 |---|---:|---|
-| `.R` | 14 | 含 `exclude/` 下 6 个备选方案脚本；`yijian.R` 在根目录 |
+| `.R` | 14 | 含 `exclude/` 下 6 个备选方案脚本；`yijian.R` 在根目录；`00test/manual_markers.R` |
 | `.md` | 8 | 6 个 `Lesson-*.md` + `05_celltype_annotation/细胞注释.md` + 本规范文档 |
-| `.csv` | 26 | 25 个在 `output/`、`exclude/` 下的结果表 + `celltype_map.csv` 人工注释映射表 |
+| `.csv` | 26 | 25 个在 `output/`、`exclude/` 下的结果表 + `celltype_map.csv` 人工注释映射表 + `00test/celltype_map.csv` |
 | 配置文件 | 2 | `.gitignore`、`.gitattributes` |
+
+> 注：`00test/` 是项目里的一个小型验证目录（1 个 `.R` + 1 个 `.csv`），已一并入库；如不需要可随时 `git rm -r --cached 00test`。另外本仓库已设仓库级 `core.autocrlf=false`，换行符完全交给 `.gitattributes` 的 `eol=lf` 控制，避免 `system` 级 `autocrlf=true` 在 Windows 上带来的 CRLF 噪音。
 
 > 以上已用脚本按 gitignore 语义模拟核对：`.R` / `.md` / `.csv` 误伤数为 0，入库最大单文件仅 0.12 MB（`yijian.R`）。
 
