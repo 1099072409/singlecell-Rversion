@@ -1,0 +1,35 @@
+# ===========================================================
+# 换行符与二进制控制
+# 说明：本机 system 级 core.autocrlf=true 且为共享 PortableGit，
+#       故不改动全局配置，改为在仓库内用本文件精确控制。
+#       R 解析器对 LF / CRLF 均不敏感；真正敏感的是二进制文件，
+#       一旦被误做换行转换，.rds / .pdf 会直接损坏。
+# ===========================================================
+
+# 默认：交给 Git 自动判断文本/二进制
+* text=auto
+
+# 文本文件统一按 LF 入库（diff 不会因行尾整片飘红）
+*.R    text eol=lf
+*.r    text eol=lf
+*.Rmd  text eol=lf
+*.md   text eol=lf
+*.csv  text eol=lf
+*.tsv  text eol=lf
+*.txt  text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.sh   text eol=lf
+
+# 二进制文件：禁止任何换行转换
+*.rds  binary
+*.rda  binary
+*.pdf  binary
+*.png  binary
+*.jpg  binary
+*.tiff binary
+*.gz   binary
+*.zip  binary
+*.h5ad binary
+*.h5seurat binary
