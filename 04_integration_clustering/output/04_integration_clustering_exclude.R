@@ -1,13 +1,13 @@
 # =====================================================================
 # 04_integration_clustering_exclude.R
 # 单细胞数据分析流程 - 第四步（标准化 + 去批次 + 降维 + 聚类）【exclude 变体】
-#   本脚本位于 Rversion/04_integration_clustering/exclude/ 下，与
+#   本脚本位于 Rversion/04_integration_clustering/output/ 下（subset 变体），与
 #   04_integration_clustering.R 逻辑、参数、输出完全一致，差异如下：
-#   a) 输入改为 Rversion/03_extract_cd45/exclude/03_CD45_positive.rds
+#   a) 输入改为 Rversion/03_extract_cd45/initiation/03_CD45_positive.rds
 #      （exclude 分析产物：剔除 ypN07/011/012/013/014 后 18 个样本的 CD45+ 对象）
 #   b) 脚本内含"按指定条件剔除样本"的防御性步骤（EXCLUDE_SAMPLES），
 #      即使输入为未剔除数据也能正确执行；输入已剔除时自动确认并跳过
-#   c) 输出写到脚本自身所在目录（04_integration_clustering/exclude 文件夹）
+#   c) 输出写到脚本自身所在目录（04_integration_clustering/output 文件夹（subset））
 #   d) 默认 STOP_AFTER_MULTI_RES_UMAP=TRUE：执行至多分辨率 UMAP 图
 #      （02_UMAP_multi_resolution.pdf）后，保存主 cluster 列 + 聚类统计表 +
 #      整合对象（04_CD45_integrated.rds）即停止，不生成后续默认分辨率图
@@ -70,15 +70,15 @@ script_dir <- tryCatch({
 cat(sprintf("脚本目录: %s\n", script_dir))
 
 # ---- 输入/输出路径 ----
-# 本脚本位于 Rversion/04_integration_clustering/exclude/ 下：
-#   - 输入：Rversion/03_extract_cd45/exclude/03_CD45_positive.rds
-#     （exclude 分析产物：剔除 5 个样本后的 CD45+ 对象，18 个样本）
-#   - 输出：脚本自身所在目录（04_integration_clustering/exclude 文件夹）
-INPUT_RDS <- file.path(script_dir, "..", "..", "03_extract_cd45", "exclude", "03_CD45_positive.rds") # 输入：03 的 exclude 产物
-OUT_DIR   <- script_dir                                                   # 输出到 04_integration_clustering/exclude 文件夹
+# 本脚本位于 Rversion/04_integration_clustering/output/ 下（subset 变体）：
+#   - 输入：Rversion/03_extract_cd45/output/03_CD45_positive.rds
+#     （subset 分析产物：剔除 5 个样本后的 CD45+ 对象，18 个样本）
+#   - 输出：脚本自身所在目录（04_integration_clustering/output 文件夹，装着 subset 结果）
+INPUT_RDS <- file.path(script_dir, "..", "..", "03_extract_cd45", "output", "03_CD45_positive.rds") # 输入：03 的 subset（原 exclude）产物
+OUT_DIR   <- script_dir                                                   # 输出到 04_integration_clustering/output 文件夹（subset）
 
 # ---- 样本剔除条件（按指定条件剔除样本） ----
-# 需剔除的样本标签（与 03_extract_cd45/exclude 剔除口径一致）：
+# 需剔除的样本标签（与 03_extract_cd45/output 剔除口径一致）：
 #   ypN07、ypN011、ypN012、ypN013、ypN014（均为 ypN0 组样本）
 # 本脚本读取的输入已是剔除后的对象，此步骤为防御性执行：
 #   - 若对象中仍含这些样本 → 按条件剔除
@@ -222,7 +222,7 @@ if (!"sample" %in% colnames(obj@meta.data)) {      # 输入对象没有 sample �
 cat(sprintf("样本数: %d\n", length(unique(obj$sample)))) # 打印样本数（exclude 版应为 18）
 
 ## ---- 2.6 按指定条件剔除样本（防御性，用户需求专项） ----
-# 输入 03_extract_cd45/exclude/03_CD45_positive.rds 已是剔除 EXCLUDE_SAMPLES
+# 输入 03_extract_cd45/initiation/03_CD45_positive.rds 已是剔除 EXCLUDE_SAMPLES
 # （ypN07/ypN011/ypN012/ypN013/ypN014）后的对象。本步骤确保脚本自包含：
 #   1) 若对象中仍含这些样本 → 按 EXCLUDE_BY_COL 列剔除，并打印剔除前后细胞数；
 #   2) 若对象中已无这些样本 → 打印确认信息后继续（不重复误删、不报错中止）；
@@ -700,7 +700,7 @@ cat(sprintf("细胞数: %d\n", ncol(obj)))                        # 总细胞数
 cat(sprintf("默认分辨率 res=%s 的簇数: %d\n",                  # 簇数
             DEFAULT_RESOLUTION, length(unique(obj$cluster))))
 cat(sprintf("本次使用的 PC 数（DIMS）: %d\n", max(DIMS)))      # 实际使用的 PC 数
-cat("\n输出文件清单（位于本目录 exclude/ 中）：\n")
+cat("\n输出文件清单（位于本目录 output/ 中）：\n")
 cat("  04_CD45_integrated.rds           - 整合聚类后的 Seurat 对象\n")
 cat("  01_PC_variance_table.csv         - 各 PC 方差/累积方差表（PC 选择依据）\n")
 cat("  01_clustering_summary.csv        - 主 cluster 细胞数与占比\n")

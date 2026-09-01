@@ -1,13 +1,13 @@
 # =====================================================================
 # 05_celltype_annotation_exclude.R
 # 单细胞数据分析流程 - 第五步（CD45+ 免疫细胞类型注释）【exclude 变体】
-#   本脚本位于 Rversion/05_celltype_annotation/exclude/ 下，与
+#   本脚本位于 Rversion/05_celltype_annotation/output/ 下（subset 变体），与
 #   05_celltype_annotation.R 逻辑、参数、输出完全一致，差异如下：
-#   a) 输入改为 Rversion/04_integration_clustering/exclude/04_CD45_integrated.rds
+#   a) 输入改为 Rversion/04_integration_clustering/output/04_CD45_integrated.rds
 #      （exclude 分析产物：剔除 ypN07/011/012/013/014 后 18 个样本的 CD45+ 整合对象）
 #   b) 脚本内含"按指定条件剔除样本"的防御性步骤（EXCLUDE_SAMPLES），
 #      即使输入为未剔除数据也能正确执行；输入已剔除时自动确认并跳过
-#   c) 输出写到脚本自身所在目录（05_celltype_annotation/exclude 文件夹）
+#   c) 输出写到脚本自身所在目录（05_celltype_annotation/output 文件夹，subset）
 #   细胞注释信息（CELLTYPE_MARKERS / MARKER_SETS）与绘图方式（SeuratExtend：
 #   DimPlot2 / FeaturePlot3.grid / DotPlot2 / Heatmap / ClusterDistrBar）与
 #   主脚本一致；详见 05_celltype_annotation.R 顶部说明。
@@ -27,7 +27,7 @@
 #     "C:/Program Files/R/R-4.4.3/bin/Rscript.exe" 05_celltype_annotation_exclude.R
 #   说明：所有路径按脚本自身所在目录自动推算，可从任意工作目录运行。
 #
-# 输出文件清单（位于本 exclude/ 目录）：
+# 输出文件清单（位于本 output/ 目录）：
 #   05_annotated.rds                   - 注释后的 Seurat 对象（含打分与 celltype 列）
 #   01_celltype_score_by_cluster.csv   - cluster × 细胞类型平均得分矩阵
 #   02_score_heatmap.pdf               - 打分热图（注释主要依据）
@@ -40,7 +40,7 @@
 #   02_celltype_summary.csv / 03_celltype_by_group.csv - 组成统计表
 #   celltype_map_template.csv          - 注释映射模板（cluster → celltype 待填）
 #
-# 参考：Rversion/04_integration_clustering/exclude/04_integration_clustering_exclude.R
+# 参考：Rversion/04_integration_clustering/output/04_integration_clustering_exclude.R
 #       （同名 exclude 变体的设计范式：输入/输出重定向 + 防御性剔除）
 # =====================================================================
 
@@ -76,13 +76,13 @@ script_dir <- tryCatch({
 cat(sprintf("脚本目录: %s\n", script_dir))
 
 # 第四步整合聚类对象（CD45+ 免疫细胞）的【exclude 变体】路径。
-# 默认：脚本目录上一级的 04_integration_clustering/exclude/04_CD45_integrated.rds
+# 默认：脚本目录上一级的 04_integration_clustering/output/04_CD45_integrated.rds
 # 原因：本 exclude 脚本对应 04 的 exclude 变体，读取剔除 5 个样本后的 18 样本整合对象；
 #       相对路径保证可移植，且两阶段 exclude 流程无缝衔接（输入即上一步 exclude 产物）。
-INPUT_RDS <- file.path(script_dir, "..", "..", "04_integration_clustering", "exclude", "04_CD45_integrated.rds")
+INPUT_RDS <- file.path(script_dir, "..", "..", "04_integration_clustering", "output", "04_CD45_integrated.rds")
 
 # 本步输出目录（自动创建）。原因：所有中间结果与图表统一落盘于脚本自身所在目录
-# （05_celltype_annotation/exclude 文件夹），与 04_integration_clustering_exclude.R 一致，
+# （05_celltype_annotation/output 文件夹，subset），与 04_integration_clustering_exclude.R 一致，
 # 不走 output/ 子目录，便于区分"全样本"与"剔除样本"两套结果。
 OUT_DIR   <- script_dir
 
@@ -229,7 +229,7 @@ if (file.exists(MANUAL_MARKERS_FILE)) {
 # -------------------------------------------------------------------
 # 0.7 样本剔除条件（按指定条件剔除样本）
 # -------------------------------------------------------------------
-# 需剔除的样本标签（与 03_extract_cd45/exclude、04_integration_clustering/exclude 剔除口径一致）：
+# 需剔除的样本标签（与 03_extract_cd45/output、04_integration_clustering/output 剔除口径一致）：
 #   ypN07、ypN011、ypN012、ypN013、ypN014（均为 ypN0 组样本）
 # 本脚本读取的输入已是剔除后的对象，此步骤为防御性执行：
 #   - 若对象中仍含这些样本 → 按条件剔除
@@ -584,7 +584,7 @@ if (!"group" %in% colnames(obj@meta.data)) {
 }
 
 ## ---- 2.6 按指定条件剔除样本（防御性，用户需求专项） ----
-# 输入 04_integration_clustering/exclude/04_CD45_integrated.rds 已是剔除 EXCLUDE_SAMPLES
+# 输入 04_integration_clustering/output/04_CD45_integrated.rds 已是剔除 EXCLUDE_SAMPLES
 # （ypN07/ypN011/ypN012/ypN013/ypN014）后的对象。本步骤确保脚本自包含：
 #   1) 若对象中仍含这些样本 → 按 EXCLUDE_BY_COL 列剔除，并打印剔除前后细胞数；
 #   2) 若对象中已无这些样本 → 打印确认信息后继续（不重复误删、不报错中止）；
@@ -794,7 +794,7 @@ if (annotated) {
 } else {
   cat("当前为首次运行：请查看打分热图与 marker UMAP 后填写 celltype_map.csv 并重跑。\n")
 }
-cat("\n输出文件清单（位于本 exclude/ 目录）：\n")
+cat("\n输出文件清单（位于本 output/ 目录）：\n")
 cat("  05_annotated.rds                   - 注释后的 Seurat 对象（含打分与 celltype 列）\n")
 cat("  01_celltype_score_by_cluster.csv   - cluster × 细胞类型平均得分矩阵\n")
 cat("  02_score_heatmap.pdf               - 打分热图（注释主要依据）\n")

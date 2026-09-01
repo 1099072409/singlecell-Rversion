@@ -65,9 +65,9 @@ script_dir <- tryCatch({
 cat(sprintf("脚本目录: %s\n", script_dir))
 
 # ---- 输入/输出路径 ----
-# 本脚本位于 Rversion/03_extract_cd45/exclude/ 下：
+# 本脚本位于 Rversion/03_extract_cd45/initiation/ 下（subset 变体）：
 #   - 输入：同目录下的 03_CD45_positive.rds（exclude 分析产物，18 个样本）
-#   - 输出：脚本自身所在目录（exclude 文件夹，与 03 产物同处一室）
+#   - 输出：脚本自身所在目录（output 文件夹，subset 数据，与 03 产物同处一室）
 INPUT_RDS <- file.path(script_dir, "03_CD45_positive.rds")                # exclude 版 CD45+ 细胞对象
 OUT_DIR   <- script_dir                                                   # 输出到 exclude 文件夹（脚本所在目录）
 

@@ -57,10 +57,12 @@ cat(sprintf("脚本目录: %s\n", script_dir))
 
 # ---- 输入/输出路径 ----
 INPUT_RDS <- file.path(script_dir, "..", "03_extract_cd45", "output", "03_CD45_positive.rds") # 第三步 CD45+ 细胞对象
-OUT_DIR   <- file.path(script_dir, "output")                                                  # 本步输出目录（自动创建）
+OUT_DIR   <- file.path(script_dir, "output")                                                      # 本步输出目录（自动创建）
 
+EXCLUDE_SAMPLES <- c("ypN07", "ypN011", "ypN012", "ypN013", "ypN014")
+EXCLUDE_BY_COL  <- "sample_id"  # 按 meta.data 中哪一列进行样本剔除（03 产物中为 sample_id）
 # ---- 标准化参数 ----
-NFEATURES     <- 3000      # 高变基因（HVG）数量（FindVariableFeatures 的 nfeatures）
+NFEATURES     <- 2500      # 高变基因（HVG）数量（FindVariableFeatures 的 nfeatures）
 REGRESS_MT    <- TRUE      # ScaleData 是否回归 percent.mt（TRUE 对齐 yijian.R；FALSE 保留线粒体差异）
 
 # ---- 降维参数 ----
@@ -79,7 +81,7 @@ MAX_PCS          <- 40     # 自动选择的最多 PC 数（上限，避免纳�
 UMAP_METHOD     <- "uwot"  # UMAP 实现（R 原生 uwot；也可 "umap-learn" 需 Python）
 UMAP_METRIC     <- "cosine"# 距离度量（单细胞数据常用 cosine；可选 "euclidean"）
 UMAP_NEIGHBORS  <- 25      # n.neighbors：局部邻域大小（越小越强调局部结构）
-UMAP_MIN_DIST   <- 0.2     # min.dist：嵌入点间最小距离（越大越分散；0.1/0.3/0.5 可先试图再选）
+UMAP_MIN_DIST   <- 0.3     # min.dist：嵌入点间最小距离（越大越分散；0.1/0.3/0.5 可先试图再选）
 UMAP_SPREAD     <- 1       # spread：嵌入的有效尺度（配合 min.dist 调节）
 TSNE_PERPLEXITY <- 30      # tSNE 困惑度（通常 5~50，越大越全局）
 
@@ -93,14 +95,27 @@ PLOT_HARMONY_CONVERGENCE <- TRUE # 是否绘制 Harmony 收敛诊断图（图 10
                            #   若画图失败（不同版本 harmony 槽结构差异）脚本会自动跳过，不影响主流程。
 
 # ---- 聚类参数 ----
-RESOLUTIONS        <- c(0.1,0.2, 0.3, 0.4, 0.5,0.6,0.7,0.8,0.9,1.0)  # 要尝试的聚类分辨率（可增删）
+RESOLUTIONS        <- c(0.01,0.05,0.1,0.2, 0.3, 0.4, 0.5,0.7,0.9)  # 要尝试的聚类分辨率（可增删）
 CLUSTER_ALGORITHM  <- 1               # 聚类算法：1=Louvain, 2=Leiden(需 leiden 包), 3=SLM, 4=Leiden(需 leiden 包)
 CLUSTER_METHOD     <- "igraph"        # 图构建方法（igraph 为推荐默认）
 GROUP_SINGLETONS   <- TRUE            # 是否将孤立单细胞簇并入最近簇（避免单细胞噪声簇）
 
 # ---- 其他 ----
-RUN_TSNE <- TRUE        # 是否运行 tSNE 降维（较慢，可关闭）
+RUN_TSNE <- F        # 是否运行 tSNE 降维（较慢，可关闭）
 SEED     <- 123         # 随机种子（保证 UMAP/聚类结果可复现）
+
+# ---- 各 cluster marker 点图（9.10 小节）----
+MARKER_TOP_N    <- 30       # 每个 cluster 取 top N 个 marker 基因（默认 30）
+MARKER_ONLY_POS <- TRUE     # FindAllMarkers 只保留上调（only.pos）
+MARKER_MIN_PCT  <- 0.25     # 最小表达细胞比例（对齐 yijian.R / 05 脚本）
+MARKER_LOGFC    <- 0.25     # 最小 log2FC（对齐 yijian.R / 05 脚本）
+DOT_COLOR_SCHEME <- "Reds"  # 点图配色（白→红，对齐 05 脚本）
+DOT_BORDER      <- FALSE    # 不画点边框
+DOT_SHOW_GRID   <- T    # 画网格线
+DOT_FLIP        <- TRUE     # 翻转：基因名放横轴、水平可读
+DOT_W_PER_GENE  <- 0.1     # 每个基因占的横向宽度（英寸）——"非常大"的关键，原0.25
+DOT_H_PER_ROW   <- 0.15    # 每个 cluster 占的高度（英寸），原0.55
+DOT_BASE_H      <- 2        # 点图基础高度（英寸）
 
 ## ---- 1. 依赖检查与加载 ----
 
@@ -180,6 +195,42 @@ if (!"sample" %in% colnames(obj@meta.data)) {      # 输入对象没有 sample �
 }
 cat(sprintf("样本数: %d\n", length(unique(obj$sample)))) # 打印样本数（应为 23）
 
+## ---- 2.6 按指定条件剔除样本（防御性，用户需求专项） ----
+# 输入 03_extract_cd45/initiation/03_CD45_positive.rds 已是剔除 EXCLUDE_SAMPLES
+# （ypN07/ypN011/ypN012/ypN013/ypN014）后的对象。本步骤确保脚本自包含：
+#   1) 若对象中仍含这些样本 → 按 EXCLUDE_BY_COL 列剔除，并打印剔除前后细胞数；
+#   2) 若对象中已无这些样本 → 打印确认信息后继续（不重复误删、不报错中止）；
+#   3) 若剔除列缺失 → 打印警告并跳过（不中断主流程）。
+cat("\n==== 2.6 按指定条件剔除样本 ====\n")
+cat(sprintf("  排除样本列表: %s\n", paste(EXCLUDE_SAMPLES, collapse = ", ")))
+if (!EXCLUDE_BY_COL %in% colnames(obj@meta.data)) {
+  cat(sprintf("  警告: meta.data 中无 %s 列，跳过样本剔除检查（继续运行）。\n", EXCLUDE_BY_COL))
+} else {
+  all_ids <- unique(as.character(obj@meta.data[[EXCLUDE_BY_COL]]))
+  present <- intersect(EXCLUDE_SAMPLES, all_ids)
+  missing <- setdiff(EXCLUDE_SAMPLES, all_ids)
+  
+  if (length(present) > 0) {
+    cat(sprintf("  剔除前: %d 个样本 / %d 个细胞\n", length(all_ids), ncol(obj)))
+    cat(sprintf("  剔除样本: %s\n", paste(present, collapse = ", ")))
+    
+    # 修复：直接使用列名，不要用 obj[[...]]
+    obj <- subset(obj, subset = !(sample_id %in% EXCLUDE_SAMPLES))
+    
+    n_after <- length(unique(as.character(obj@meta.data[[EXCLUDE_BY_COL]])))
+    cat(sprintf("  剔除后: %d 个样本 / %d 个细胞\n", n_after, ncol(obj)))
+  }
+  
+  if (length(missing) > 0 && length(present) == 0) {
+    cat("  （以上样本在 03 exclude 步骤已剔除，符合预期）\n")
+  } else if (length(missing) > 0) {
+    cat(sprintf("  注意: 以下样本不在数据中（可能已在 03 剔除）: %s\n",
+                paste(missing, collapse = ", ")))
+  }
+}
+
+
+
 ## ---- 3. 标准化（LogNormalize）----
 
 # 3.1 对数归一化：每个细胞的 counts 除以总计数并乘以 10000，再 log1p 变换
@@ -203,11 +254,35 @@ if (REGRESS_MT) {                                  # 需要回归线粒体比例
 ## ---- 4. PCA 降维与 PC 数选择 ----
 
 # 通用 PDF 保存函数：把 ggplot 对象 p 输出到 OUT_DIR 下的 file，尺寸 w×h 英寸
+# 已加固：先写临时文件再原子替换；若目标旧文件正被占用（如被 PDF 预览器锁定）无法删除，
+# 则改存带时间戳的副本，保证单图失败不中断整条流程。
 save_pdf <- function(p, file, w, h) {              # 通用 PDF 保存函数（提前定义）
-  pdf(file.path(OUT_DIR, file), width = w, height = h) # 打开 PDF 设备
-  print(p)                                         # 打印图形
-  dev.off()                                        # 关闭设备（必须，否则文件不完整）
-  cat(sprintf("  已保存图表: %s\n", file))          # 提示保存成功
+  out_path <- file.path(OUT_DIR, file)
+  tmp_path <- tempfile(fileext = ".pdf")
+  ok <- tryCatch({
+    pdf(tmp_path, width = w, height = h)           # 先写到临时文件，绕过“覆写已占用文件”的失败
+    print(p)                                       # 打印图形
+    dev.off()                                      # 关闭设备
+    if (file.exists(out_path)) {                   # 旧文件存在时尝试原子替换
+      if (!file.remove(out_path)) {                # 旧文件被占用、删不掉
+        alt <- file.path(OUT_DIR, sub("\\.pdf$",
+                  sprintf("_%s.pdf", format(Sys.time(), "%H%M%S")), file))
+        file.rename(tmp_path, alt)                 # 改存带时间戳副本，流程继续
+        cat(sprintf("  注意: %s 被占用，已改存为 %s\n", file, basename(alt)))
+        return(invisible(TRUE))
+      }
+    }
+    file.rename(tmp_path, out_path)                # 替换成功
+    cat(sprintf("  已保存图表: %s\n", file))
+    invisible(TRUE)
+  }, error = function(e) {                         # 任何异常都不中断主流程
+    if (dev.cur() > 1) dev.off()
+    if (file.exists(tmp_path)) try(file.remove(tmp_path), silent = TRUE)
+    cat(sprintf("  警告: 保存 %s 失败（已跳过，不影响其余流程）: %s\n",
+                file, conditionMessage(e)))
+    invisible(FALSE)
+  })
+  invisible(ok)
 }
 
 # 4.1 运行 PCA：先跑足 NPCS 个主成分（50），供后续 ElbowPlot/方差表判断保留多少个 PC
@@ -357,6 +432,52 @@ if (RUN_TSNE) {                                    # 开启 tSNE 时
   cat("tSNE 完成。\n")
 }
 
+# ==== 9.8 Harmony 去批次效果对比图（核心诊断图，默认分辨率下） ====
+# 左 = 未整合（基于 PCA 的 UMAP），右 = 整合后（基于 Harmony 的 UMAP），均按样本着色。
+# 判读标准：左图样本各自成团（批次效应明显）→ 右图样本混合均匀即去批次有效；
+# 若右图仍存在整块样本聚团 → 去批次不足，可调大 HARMONY_THETA（如 5）后重跑；
+# 右图出现单一类型跨样本对齐但与其他类型分离，属正常（生物学差异保留）。
+if (RUN_HARMONY && "harmony" %in% names(obj@reductions)) { # 开启了 Harmony 时
+  cat("  绘制 Harmony 去批次前后对比图（需额外运行一次 PCA-UMAP，约数分钟）...\n")
+  # 基于 PCA 再跑一个独立 UMAP，存为 umap.pca（不覆盖整合后的 umap 降维）
+  obj <- RunUMAP(obj,
+    reduction = "pca", dims = DIMS,                # 输入未整合的 PCA 嵌入
+    reduction.name = "umap.pca", reduction.key = "PCUMAP_", # 独立命名保存，避免冲突
+    umap.method = UMAP_METHOD, metric = UMAP_METRIC, # 与主 UMAP 相同的参数（保证可比）
+    n.neighbors = UMAP_NEIGHBORS, min.dist = UMAP_MIN_DIST,
+    spread = UMAP_SPREAD, seed.use = SEED, verbose = FALSE) # 完整参数
+  # 左图：整合前（PCA-UMAP）按样本着色 —— 预期各样本各自成团（批次效应）
+  p_before <- DimPlot(obj, reduction = "umap.pca", group.by = "sample",
+                      label = FALSE) +             # 按样本着色
+    theme_minimal() +                              # 简洁主题
+    labs(title = "Before Harmony (PCA-UMAP)")      # 标题注明未整合
+  # 右图：整合后（Harmony-UMAP）按样本着色 —— 预期样本混合均匀（去批次效果）
+  p_after <- DimPlot(obj, reduction = "umap", group.by = "sample",
+                     label = FALSE) +              # 按样本着色
+    theme_minimal() +                              # 简洁主题
+    labs(title = "After Harmony (Harmony-UMAP)")   # 标题注明已整合
+  p_ba <- patchwork::wrap_plots(p_before, p_after, ncol = 2) # 左右并排拼图
+  save_pdf(p_ba, "09_Harmony_before_after_UMAP.pdf", 16, 7) # 保存对比图
+}
+
+# ==== 9.9 Harmony 收敛诊断图（可选） ====
+# 展示各轮迭代批次校正目标（theta 散度）的下降情况。
+# 曲线随迭代趋于平稳 → Harmony 已收敛（默认迭代轮数足够）；
+# 若尚未平稳，说明需要更多迭代，可在 RunHarmony 中增大 max.iter.harmony。
+# 注：harmony 不同版本的收敛数据槽结构有差异，绘制失败会自动跳过，不影响主流程。
+if (PLOT_HARMONY_CONVERGENCE && !is.null(harmony_final)) { # 有收敛数据时
+  p_conv <- tryCatch(                              # 版本差异兜底：失败返回 NULL
+    harmony::plot_convergence(harmony_final),      # harmony 包自带的收敛图函数
+    error = function(e) NULL)                      # 出错则跳过
+  if (!is.null(p_conv)) {                          # 绘制成功时
+    p_conv <- p_conv + theme_minimal() +           # 简洁主题
+      labs(title = "Harmony convergence")          # 图标题
+    save_pdf(p_conv, "10_Harmony_convergence.pdf", 7, 5) # 保存收敛图
+  } else {                                         # 绘制失败时
+    cat("  注意: Harmony 收敛图绘制失败（harmony 版本差异），已跳过，不影响主流程。\n")
+  }
+}
+
 ## ---- 7. 聚类（FindNeighbors + FindClusters，多分辨率）----
 
 # 7.1 构建 KNN 图与 SNN 图（基于 harmony/pca 嵌入，前 DIMS 维），聚类的基础
@@ -488,50 +609,68 @@ if (RUN_TSNE && "tsne" %in% names(obj@reductions)) { # tSNE 存在时
   save_pdf(p_tsne, "08_TSNE_by_cluster.pdf", 9, 7) # 保存
 }
 
-# ==== 9.8 Harmony 去批次效果对比图（核心诊断图，默认分辨率下） ====
-# 左 = 未整合（基于 PCA 的 UMAP），右 = 整合后（基于 Harmony 的 UMAP），均按样本着色。
-# 判读标准：左图样本各自成团（批次效应明显）→ 右图样本混合均匀即去批次有效；
-# 若右图仍存在整块样本聚团 → 去批次不足，可调大 HARMONY_THETA（如 5）后重跑；
-# 右图出现单一类型跨样本对齐但与其他类型分离，属正常（生物学差异保留）。
-if (RUN_HARMONY && "harmony" %in% names(obj@reductions)) { # 开启了 Harmony 时
-  cat("  绘制 Harmony 去批次前后对比图（需额外运行一次 PCA-UMAP，约数分钟）...\n")
-  # 基于 PCA 再跑一个独立 UMAP，存为 umap.pca（不覆盖整合后的 umap 降维）
-  obj <- RunUMAP(obj,
-    reduction = "pca", dims = DIMS,                # 输入未整合的 PCA 嵌入
-    reduction.name = "umap.pca", reduction.key = "PCUMAP_", # 独立命名保存，避免冲突
-    umap.method = UMAP_METHOD, metric = UMAP_METRIC, # 与主 UMAP 相同的参数（保证可比）
-    n.neighbors = UMAP_NEIGHBORS, min.dist = UMAP_MIN_DIST,
-    spread = UMAP_SPREAD, seed.use = SEED, verbose = FALSE) # 完整参数
-  # 左图：整合前（PCA-UMAP）按样本着色 —— 预期各样本各自成团（批次效应）
-  p_before <- DimPlot(obj, reduction = "umap.pca", group.by = "sample",
-                      label = FALSE) +             # 按样本着色
-    theme_minimal() +                              # 简洁主题
-    labs(title = "Before Harmony (PCA-UMAP)")      # 标题注明未整合
-  # 右图：整合后（Harmony-UMAP）按样本着色 —— 预期样本混合均匀（去批次效果）
-  p_after <- DimPlot(obj, reduction = "umap", group.by = "sample",
-                     label = FALSE) +              # 按样本着色
-    theme_minimal() +                              # 简洁主题
-    labs(title = "After Harmony (Harmony-UMAP)")   # 标题注明已整合
-  p_ba <- patchwork::wrap_plots(p_before, p_after, ncol = 2) # 左右并排拼图
-  save_pdf(p_ba, "09_Harmony_before_after_UMAP.pdf", 16, 7) # 保存对比图
-}
+## ---- 9.10 各 cluster top30 marker 点图（默认分辨率 res=0.4，超大尺寸） ----
 
-# ==== 9.9 Harmony 收敛诊断图（可选） ====
-# 展示各轮迭代批次校正目标（theta 散度）的下降情况。
-# 曲线随迭代趋于平稳 → Harmony 已收敛（默认迭代轮数足够）；
-# 若尚未平稳，说明需要更多迭代，可在 RunHarmony 中增大 max.iter.harmony。
-# 注：harmony 不同版本的收敛数据槽结构有差异，绘制失败会自动跳过，不影响主流程。
-if (PLOT_HARMONY_CONVERGENCE && !is.null(harmony_final)) { # 有收敛数据时
-  p_conv <- tryCatch(                              # 版本差异兜底：失败返回 NULL
-    harmony::plot_convergence(harmony_final),      # harmony 包自带的收敛图函数
-    error = function(e) NULL)                      # 出错则跳过
-  if (!is.null(p_conv)) {                          # 绘制成功时
-    p_conv <- p_conv + theme_minimal() +           # 简洁主题
-      labs(title = "Harmony convergence")          # 图标题
-    save_pdf(p_conv, "10_Harmony_convergence.pdf", 7, 5) # 保存收敛图
-  } else {                                         # 绘制失败时
-    cat("  注意: Harmony 收敛图绘制失败（harmony 版本差异），已跳过，不影响主流程。\n")
+# 9.10.1 计算各 cluster 的 marker 基因（每个 cluster vs 其余，仅保留上调）。
+#        阈值与 yijian.R / 05 脚本一致（min.pct=0.25, logfc.threshold=0.25）。
+cat("\n==== 9.10 各 cluster top30 marker 点图 ====\n")
+cat("运行 FindAllMarkers（约 8 万细胞，可能需数分钟到数十分钟）...\n")
+all_markers <- FindAllMarkers(obj,
+  only.pos        = MARKER_ONLY_POS,          # 只保留上调 marker
+  min.pct         = MARKER_MIN_PCT,           # 最小表达细胞比例
+  logfc.threshold = MARKER_LOGFC)             # 最小 log2FC
+
+# 9.10.2 取每个 cluster top30（按 avg_log2FC 降序），整理为命名 list（cluster → 基因）
+top_markers <- all_markers %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::slice_max(order_by = avg_log2FC, n = MARKER_TOP_N, with_ties = FALSE) %>%
+  dplyr::ungroup()
+marker_list <- split(top_markers$gene, top_markers$cluster)           # 命名 list
+marker_list <- marker_list[order(as.numeric(names(marker_list)))]     # 按 cluster 编号排序
+marker_list <- lapply(marker_list, function(g) g[g %in% rownames(obj)]) # 过滤不存在基因
+write.csv(top_markers, file.path(OUT_DIR, "11_cluster_top30_markers.csv"), row.names = FALSE)
+cat(sprintf("  已保存: 11_cluster_top30_markers.csv（每 cluster top%d marker）\n", MARKER_TOP_N))
+
+# 9.10.3 按需安装并加载 SeuratExtend（仅本小节需要，失败则降级跳过绘图，不影响主流程）
+se_ok <- TRUE
+if (!requireNamespace("SeuratExtend", quietly = TRUE)) {
+  cat("  正在安装 SeuratExtend（GitHub 源码包 huayc09/SeuratExtend，需 Rtools）...\n")
+  if (!requireNamespace("remotes", quietly = TRUE)) {
+    install.packages("remotes", repos = "https://cloud.r-project.org")
   }
+  se_ok <- tryCatch({
+    remotes::install_github("huayc09/SeuratExtend", upgrade = "never", quiet = TRUE)
+    requireNamespace("SeuratExtend", quietly = TRUE)
+  }, error = function(e) {
+    cat("  SeuratExtend 安装失败:", conditionMessage(e), "\n")
+    FALSE
+  })
+}
+if (!se_ok) {
+  warning("SeuratExtend 不可用，跳过 DotPlot2（top30 marker 表已输出到 11_cluster_top30_markers.csv）")
+} else {
+  library(SeuratExtend)                        # 提供 DotPlot2
+
+  # 9.10.4 超大尺寸点图：横轴=基因（按 cluster 分组），纵轴=cluster；
+  #         点大小=表达比例、颜色=平均表达（Reds 白→红）。
+  p_dot <- DotPlot2(obj,
+    features     = marker_list,                # 命名 list：cluster → top30 基因
+    group.by     = "cluster",                  # 按主 cluster（默认分辨率 res=0.4）分组
+    color_scheme = DOT_COLOR_SCHEME,           # 配色方案
+    border       = DOT_BORDER,                 # 不画点边框
+    show_grid    = DOT_SHOW_GRID,              # 不画网格线
+    flip         = DOT_FLIP)                   # 基因名放横轴、水平可读
+
+  # 9.10.5 按基因数/簇数动态计算超大尺寸并保存（limitsize=FALSE 解除 50 英寸限制）
+  n_genes <- sum(lengths(marker_list))         # 基因总数（含跨 cluster 重复）
+  n_clus  <- length(marker_list)               # cluster 数
+  ggsave(file.path(OUT_DIR, "11_cluster_top30_marker_dotplot.pdf"), p_dot,
+         width  = max(12, n_genes * DOT_W_PER_GENE),        # 非常宽，容纳全部基因名
+         height = max(6,  n_clus * DOT_H_PER_ROW + DOT_BASE_H),
+         limitsize = FALSE)
+  cat(sprintf("  已保存: 11_cluster_top30_marker_dotplot.pdf（%.0f × %.1f 英寸）\n",
+              max(12, n_genes * DOT_W_PER_GENE),
+              max(6,  n_clus * DOT_H_PER_ROW + DOT_BASE_H)))
 }
 
 ## ---- 10. 保存整合对象与完成 ----
@@ -539,8 +678,38 @@ if (PLOT_HARMONY_CONVERGENCE && !is.null(harmony_final)) { # 有收敛数据时
 # 保存整合聚类后的 Seurat 对象（含 counts/data/scale.data、pca/harmony/umap/tsne 降维、
 # 多分辨率聚类列 cluster_0.2/0.3/0.4/0.5、主 cluster 列、以及全部 meta.data 信息，
 # 供后续细胞注释/差异分析直接使用）
-saveRDS(obj, file.path(OUT_DIR, "04_CD45_integrated.rds"))
-cat(sprintf("  已保存: %s\n", file.path(OUT_DIR, "04_CD45_integrated.rds")))
+#
+# 健壮性处理（避免像此前那样因目标 rds 被占用而崩溃、导致后续第 11 节点图无法生成）：
+#   1) 先写同目录临时文件，再尝试原子替换；
+#   2) 若目标文件被占用（如被 RStudio / 预览窗口打开）导致替换失败，则改存带时间戳的副本，
+#      绝不中断脚本；
+#   3) 整体包在 tryCatch 中，即便保存彻底失败，也继续生成第 11 节点图，不 halt。
+safe_save_rds <- function(object, target) {
+  out_dir <- dirname(target)
+  base    <- basename(target)
+  tmp     <- file.path(out_dir, paste0(".tmp_save_", Sys.getpid(), "_", base))
+  on.exit(try(file.remove(tmp), silent = TRUE), add = TRUE)
+  saveRDS(object, tmp)                              # 先写临时文件
+  ok <- tryCatch({                                  # 尝试删除旧文件并原子替换
+    if (file.exists(target)) file.remove(target)
+    file.rename(tmp, target)
+  }, error = function(e) FALSE)
+  if (isTRUE(ok) && file.exists(target)) return(invisible(TRUE))
+  # 替换失败（目标被锁）→ 改存带时间戳副本
+  ts  <- format(Sys.time(), "%Y%m%d_%H%M%S")
+  alt <- file.path(out_dir, paste0(sub("\\.rds$", "", base), "_", ts, ".rds"))
+  saveRDS(object, alt)
+  cat(sprintf("  注意: %s 被占用无法覆盖，已改存为 %s\n", base, basename(alt)))
+  invisible(FALSE)
+}
+
+tryCatch({
+  safe_save_rds(obj, file.path(OUT_DIR, "04_CD45_integrated.rds"))
+  cat(sprintf("  已保存: %s\n", file.path(OUT_DIR, "04_CD45_integrated.rds")))
+}, error = function(e) {
+  cat(sprintf("  警告: 保存 %s 失败（%s），但继续生成第 11 节点图，不中断。\n",
+              "04_CD45_integrated.rds", conditionMessage(e)))
+})
 
 # 打印最终结果摘要
 cat("\n==== 04 整合聚类完成 ====\n")
@@ -565,5 +734,81 @@ cat("  07_cluster_cell_count.pdf        - 各 cluster 细胞数柱状图（默�
 cat("  08_TSNE_by_cluster.pdf           - tSNE 按主 cluster 着色（可选，默认分辨率下）\n")
 cat("  09_Harmony_before_after_UMAP.pdf - Harmony 去批次前后 UMAP 对比（核心诊断图）\n")
 cat("  10_Harmony_convergence.pdf       - Harmony 收敛诊断图（可选，版本兼容）\n")
+cat("  11_cluster_top30_markers.csv       - 各 cluster top30 差异基因表\n")
+cat("  11_cluster_top30_marker_dotplot.pdf - 各 cluster top30 marker 点图（超大尺寸）\n")
+cat("  12_celltype_marker_dotplots.pdf  - 各细胞类别经典 marker 点图（按类别逐一，多页 2×2）\n")
 cat("\n04_integration_clustering 完成。\n")
+
+## ---- 11. 经典免疫 marker 点图（按细胞类别逐一绘制，独立于主流程） ----
+
+# 本段完全独立：不改动主流程任何对象/变量，只新增一个输出文件
+# 12_celltype_marker_dotplots.pdf。逻辑：读取经典免疫细胞 marker 表，
+# 对每一行（细胞类别）用其「经典阳性标志物（首选）」基因，绘制一张
+# x=marker基因、y=聚类簇 的点图（点大小=表达该基因的细胞比例，颜色深浅=平均表达水平），
+# 最后拼接为一个多页 PDF（每页 2×2 = 4 张）。
+
+MARKER_CSV <- file.path(script_dir, "..", "marker", "经典免疫细胞marker表_上皮限定食管癌.csv")
+
+if (!file.exists(MARKER_CSV)) {
+  warning("未找到 marker 表：", MARKER_CSV, "，跳过第 11 节点图。")
+} else {
+  cat("\n==== 11. 经典免疫 marker 点图（按细胞类别）====\n")
+  marker_tbl <- read.csv(MARKER_CSV, fileEncoding = "UTF-8",
+                         stringsAsFactors = FALSE, check.names = FALSE)
+
+  GENE_COL <- "经典阳性标志物（首选）"   # 基因列（基因用 | 分隔）
+  TYPE_COL <- "细胞类型"                 # 英文细胞类型
+  CN_COL   <- "中文名"                   # 中文名
+
+  if (!GENE_COL %in% colnames(marker_tbl)) {
+    warning("marker 表中未找到列：", GENE_COL, "，跳过第 11 节点图。")
+  } else {
+    # 按数值顺序给聚类簇排序（避免 0,1,10,11,...,2 的字典序错乱）。
+    # 用临时列 cluster_ord，绘图结束后删除，不影响主流程对象。
+    cl_lev <- as.character(sort(as.numeric(unique(obj$cluster))))
+    obj$cluster_ord <- factor(obj$cluster, levels = cl_lev)
+
+    plist <- list()
+    for (i in seq_len(nrow(marker_tbl))) {
+      genes_raw <- strsplit(as.character(marker_tbl[[GENE_COL]][i]), "|", fixed = TRUE)[[1]]
+      genes_raw <- trimws(genes_raw)                        # 去首尾空格
+      genes_raw <- sub("\\(.*\\)", "", genes_raw)           # 去括号注释：CCR7(Tcm) → CCR7
+      genes <- unique(genes_raw[genes_raw %in% rownames(obj)]) # 只保留对象中存在的基因
+
+      if (length(genes) == 0) {
+        cat(sprintf("  跳过 %s：marker 基因均不在数据中\n", marker_tbl[[TYPE_COL]][i]))
+        next
+      }
+
+      title_str <- paste0(marker_tbl[[TYPE_COL]][i], "  ", marker_tbl[[CN_COL]][i])
+      p <- DotPlot(obj, features = genes, group.by = "cluster_ord",
+                   cols = c("lightgrey", "#E64B35")) +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+              plot.title   = element_text(size = 10, face = "bold", hjust = 0.5)) +
+        xlab("") + ylab("Cluster") + ggtitle(title_str)
+      plist[[length(plist) + 1]] <- p
+      cat(sprintf("  [%2d/%d] %s：%d 个 marker 基因\n", i, nrow(marker_tbl),
+                  marker_tbl[[TYPE_COL]][i], length(genes)))
+    }
+
+    obj$cluster_ord <- NULL   # 清理临时列
+
+    # 拼接为一个多页 PDF：每页 2×2 = 4 张点图
+    if (length(plist) == 0) {
+      warning("没有可绘制的 marker 点图（所有 marker 基因均不在数据中）。")
+    } else {
+      PER_PAGE <- 4L
+      n_pages  <- ceiling(length(plist) / PER_PAGE)
+      out_pdf  <- file.path(OUT_DIR, "12_celltype_marker_dotplots.pdf")
+      pdf(out_pdf, width = 13, height = 16)
+      for (pg in seq_len(n_pages)) {
+        idx <- ((pg - 1) * PER_PAGE + 1):min(pg * PER_PAGE, length(plist))
+        print(patchwork::wrap_plots(plist[idx], ncol = 2))
+      }
+      dev.off()
+      cat(sprintf("  已保存: 12_celltype_marker_dotplots.pdf（%d 张点图，%d 页，每页 2×2）\n",
+                  length(plist), n_pages))
+    }
+  }
+}
 

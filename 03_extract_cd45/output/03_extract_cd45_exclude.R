@@ -2,7 +2,7 @@
 # 03_extract_cd45_exclude.R
 # 单细胞数据分析流程 - 第三步（提取 CD45+ 免疫细胞）【exclude 变体】
 #   与 03_extract_cd45.R 逻辑、参数、输出完全一致，仅在读入对象后剔除
-#   EXCLUDE_SAMPLES 指定的样本，结果输出到本脚本所在目录（Rversion/03_extract_cd45/exclude/）。
+#   EXCLUDE_SAMPLES 指定的样本，结果输出到本脚本所在目录（Rversion/03_extract_cd45/initiation/，subset 变体）。
 #
 # 功能：
 #   1) 读取第二步质控后的 Seurat 对象（02_seurat_qc.rds）
@@ -55,9 +55,9 @@ cat(sprintf("脚本目录: %s\n", script_dir))
 
 
 # ---- 输入/输出路径 ----
-# 本脚本位于 Rversion/03_extract_cd45/exclude/ 下：
+# 本脚本位于 Rversion/03_extract_cd45/initiation/ 下（subset 变体）：
 #   - 输入：向上两级回到 Rversion，再进入 02_quality_control/output
-#   - 输出：脚本自身所在目录（即 exclude 文件夹，数据与本脚本同处一室）
+#   - 输出：脚本自身所在目录（即 initiation 文件夹，subset 数据与本脚本同处一室）
 INPUT_RDS <- file.path(script_dir, "..", "..", "02_quality_control", "output", "02_seurat_qc.rds") # 第二步质控后的 rds
 OUT_DIR   <- script_dir                                                                       # 输出到 exclude 文件夹（脚本所在目录）
 

@@ -54,7 +54,7 @@ cat(sprintf("脚本目录: %s\n", script_dir))
 
 # ---- 输入/输出路径 ----
 INPUT_RDS <- file.path(script_dir, "..", "02_quality_control", "output", "02_seurat_qc.rds") # 第二步质控后的 rds
-OUT_DIR   <- file.path(script_dir, "output")                                                  # 本步输出目录（自动创建）
+OUT_DIR   <- file.path(script_dir, "output")                                                      # 本步输出目录（自动创建）
 
 # ---- CD45+ 判定参数 ----
 CD45_GENE      <- "PTPRC"   # CD45 标志基因名（人类；小鼠为 Ptprc，如切换物种请修改）

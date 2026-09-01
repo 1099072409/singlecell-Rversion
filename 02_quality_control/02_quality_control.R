@@ -8,12 +8,13 @@
 #      确保"分组 Group + 样本编号 SampleID"的对应关系不丢失、不串位
 #   3) 计算质控指标：线粒体基因比例 percent.mt、核糖体基因比例 percent.ribo、
 #      血红蛋白比例 percent.hb（连同 Seurat 自带的 nCount_RNA / nFeature_RNA）
-#   4) 双细胞检测（scDblFinder，可关闭）
-#   5) 按阈值过滤低质量细胞（支持两种方案）：
-#        - "fixed"：固定阈值（nFeature 200~6000、nCount>500、percent.mt<20%）
-#        - "mad"  ：参考 yijian.R 的按样本 3-MAD 自适应离群检测
-#   6) 输出：过滤后 Seurat 对象（02_seurat_qc.rds）、按样本汇总表
-#      （01_QC_summary_by_sample.csv / cell_count_by_sample.csv）、
+#   4) 过滤低质量细胞（两段式，fixed 模式）：
+#        阶段1 基础过滤（先砍下界）：nFeature>200 且 nCount>600
+#        阶段2 双细胞检测：scDblFinder（可关闭；按样本汇总输出 doublet_summary_by_sample.csv）
+#        阶段3 精细过滤（砍上界）：singlet 且 nFeature<6000、nCount<30000、percent.mt<25
+#        （"mad"：参考 yijian.R 的按样本 3-MAD 自适应离群检测，保留可选）
+#   5) 输出：过滤后 Seurat 对象（02_seurat_qc.rds）、按样本汇总表
+#      （01_QC_summary_by_sample.csv / cell_count_by_sample.csv / doublet_summary_by_sample.csv）、
 #      QC 图（过滤前后小提琴图、散点图、细胞数柱状图，PDF 格式）
 #
 # 用法：
@@ -64,22 +65,23 @@ RIBO_PATTERN <- "^RP[SL]"     # 核糖体蛋白基因前缀（RPS/RPL）
 HB_PATTERN   <- "^HB[ABDEGQZ]"# 血红蛋白基因前缀
 
 # ---- 质控模式与阈值 ----
-QC_MODE          <- "fixed"   # 质控模式："fixed"=固定阈值；"mad"=按样本 3-MAD 自适应（参考 yijian.R）
+QC_MODE          <- "fixed"   # 质控模式："fixed"=固定阈值（两段式）；"mad"=按样本 3-MAD 自适应（参考 yijian.R）
 # 提示：阈值设定遵循"参数选择先有结果"的规范——首次运行时先用默认阈值跑一遍，
 #       查看输出的 output/01_QC_violin_before_filter.pdf 与 output/00_QC_quantiles_by_sample.csv
 #       （各样本 QC 指标 5%/50%/95% 分位数），再回来调整下面的阈值。
-# fixed 模式参数（QC_MODE="fixed" 时生效）：
-FIXED_MIN_FEAT   <- 200       # 细胞最少检测到的基因数（下限）
-FIXED_MAX_FEAT   <- 6000      # 细胞最多检测到的基因数（上限，剔除极可能为双细胞/高复杂度细胞）
-FIXED_MIN_COUNTS <- 500       # 细胞最少总 UMI 计数
-FIXED_MAX_PCT_MT <- 20        # 细胞线粒体基因比例上限（%）
+# fixed 模式参数（QC_MODE="fixed" 时生效）——两段式过滤：
+FIXED_MIN_FEAT   <- 200       # 阶段1 下界：细胞最少检测到的基因数
+FIXED_MAX_FEAT   <- 6000      # 阶段3 上界：细胞最多检测到的基因数（剔除极可能为双细胞/高复杂度细胞）
+FIXED_MIN_COUNTS <- 600       # 阶段1 下界：细胞最少总 UMI 计数
+FIXED_MAX_COUNTS <- 30000     # 阶段3 上界：细胞最多总 UMI 计数
+FIXED_MAX_PCT_MT <- 20        # 阶段3 上界：细胞线粒体基因比例上限（%）
 # mad 模式参数（QC_MODE="mad" 时生效）：
 MAD_NMADS        <- 3         # MAD 离群判定倍数（中位数 ± nmads × MAD 之外视为离群）
 MAD_MIN_FEAT     <- 200       # mad 模式下 nFeature_RNA 的硬性下限（与 yijian.R 一致）
 
 # ---- 双细胞检测 ----
 RUN_DOUBLET      <- TRUE      # 是否运行 scDblFinder 双细胞检测（需要安装 Bioconductor 包）
-DOUBLET_THREADS  <- 2         # 双细胞检测线程数（Windows 下自动降级为单线程，见第 5 节说明）
+DOUBLET_THREADS  <- 2         # 双细胞检测线程数（Windows 下自动降级为单线程，见第 6 节说明）
 
 # ---- 其他 ----
 STOP_ON_MISMATCH <- FALSE     # 元数据校验不一致时：TRUE=报错终止；FALSE=警告后继续
@@ -281,16 +283,29 @@ qc_q <- obj@meta.data %>%
 write.csv(qc_q, file.path(OUT_DIR, "00_QC_quantiles_by_sample.csv"), row.names = FALSE) # 写分位数表
 cat("  已保存: 00_QC_quantiles_by_sample.csv（各样本 QC 指标分位数，供设定过滤阈值参考）\n") # 提示
 
-## ---- 5. 双细胞检测（scDblFinder，可选） ----
+## ---- 5. 基础过滤（先砍下界） ----
+
+# 阶段1：先砍下界，剔除空液滴/低质量细胞（基因数过少或总 UMI 过少）。
+# 只按下界过滤，不碰上界——上界（双细胞、高复杂度、高线粒体）留到 scDblFinder 之后的精细过滤再处理。
+cat(sprintf("\n==== 5. 基础过滤（下界: nFeature>%d 且 nCount>%d）====\n",
+            FIXED_MIN_FEAT, FIXED_MIN_COUNTS))
+merged <- subset(obj, subset = nFeature_RNA > FIXED_MIN_FEAT &
+                                nCount_RNA   > FIXED_MIN_COUNTS)
+cat(sprintf("基础过滤：%d -> %d 个细胞（移除 %d，%.2f%%）\n",
+            ncol(obj), ncol(merged), ncol(obj) - ncol(merged),
+            100 * (ncol(obj) - ncol(merged)) / ncol(obj)))
+
+## ---- 6. 双细胞检测（scDblFinder，可选） ----
 
 # 双细胞（doublet）是两个细胞被一个液滴捕获，会干扰下游聚类，通常建议剔除。
-# scDblFinder 是 Bioconductor 的常用双细胞检测包；未安装成功时自动降级（标记 not_tested，不阻塞流程）。
+# scDblFinder 是 Bioconductor 的常用双细胞检测包；未安装成功时自动降级（统一视为 singlet，不阻塞流程）。
+# 注意：在阶段1 基础过滤后的对象上运行（先剔除空液滴，检测更准确、更省内存）。
 run_doublet_detection <- function(obj) {
-  cat("\n==== 5. 双细胞检测（scDblFinder，约需 30~90 分钟）====\n")
+  cat("\n==== 6. 双细胞检测（scDblFinder，约需 30~90 分钟）====\n")
   if (!requireNamespace("scDblFinder", quietly = TRUE)) {          # 包不可用时降级
-    warning("scDblFinder 未安装，跳过双细胞检测（doublet_call 标记为 not_tested）")
-    obj$doublet_call    <- "not_tested"                             # 标记为未检测
-    obj$discard_doublet <- FALSE                                    # 不因双细胞过滤任何细胞
+    warning("scDblFinder 未安装，跳过双细胞检测（所有细胞统一视为 singlet，不做双细胞过滤）")
+    obj$scDblFinder.class <- "singlet"                              # 未检测时统一视为 singlet，避免精细过滤误删全部细胞
+    obj$discard_doublet   <- FALSE                                  # 不因双细胞过滤任何细胞
     return(obj)
   }
 
@@ -319,31 +334,45 @@ run_doublet_detection <- function(obj) {
     }
   )
   if (is.null(sce)) {                                                # 降级分支
-    obj$doublet_call    <- "not_tested"                              # 标记未检测
-    obj$discard_doublet <- FALSE                                     # 不过滤
+    obj$scDblFinder.class <- "singlet"                               # 检测失败时统一视为 singlet，避免精细过滤误删全部细胞
+    obj$discard_doublet   <- FALSE                                   # 不过滤
     return(obj)
   }
 
   # 把检测结果写回 Seurat 对象的 meta.data
   cls <- as.character(SummarizedExperiment::colData(sce)$scDblFinder.class) # 提取 singlet/doublet 分类
-  obj$doublet_call    <- cls                                         # 写入双细胞标记
-  obj$discard_doublet <- cls %in% c("doublet", "Doublet")            # 是否判定为双细胞
+  obj$scDblFinder.class <- cls                                       # 写入双细胞分类（singlet/doublet）
+  obj$discard_doublet   <- cls %in% c("doublet", "Doublet")          # 是否判定为双细胞
   cat(sprintf("双细胞比例: %.2f%%\n", 100 * mean(obj$discard_doublet))) # 打印双细胞占比
   return(obj)
 }
 
-# 按配置决定是否运行双细胞检测
+# 按配置决定是否运行双细胞检测（在基础过滤后的 merged 对象上运行）
 if (RUN_DOUBLET) {                                                   # 开关打开
-  obj <- run_doublet_detection(obj)                                  # 执行检测
+  merged <- run_doublet_detection(merged)                            # 执行检测
 } else {                                                             # 开关关闭
-  cat("\n==== 5. 双细胞检测已关闭（RUN_DOUBLET=FALSE）====\n")
-  obj$doublet_call    <- "not_tested"                                # 标记未检测
-  obj$discard_doublet <- FALSE                                       # 不过滤
+  cat("\n==== 6. 双细胞检测已关闭（RUN_DOUBLET=FALSE）====\n")
+  merged$scDblFinder.class <- "singlet"                              # 未检测时统一视为 singlet，避免精细过滤误删全部细胞
+  merged$discard_doublet   <- FALSE                                  # 不过滤
 }
 
-## ---- 6. 过滤判定（低质量细胞） ----
+# 按样本汇总双细胞检测结果（新增输出 doublet_summary_by_sample.csv）
+doublet_summary <- merged@meta.data %>%
+  dplyr::group_by(sample, group, sample_id) %>%
+  dplyr::summarise(
+    cells_tested = dplyr::n(),                                       # 参与检测的细胞数（基础过滤后）
+    singlet      = sum(scDblFinder.class == "singlet"),              # 判定为单细胞的个数
+    doublet      = sum(scDblFinder.class %in% c("doublet", "Doublet")), # 判定为双细胞的个数
+    doublet_pct  = 100 * doublet / cells_tested,                     # 双细胞比例（%）
+    .groups      = "drop"
+  )
+write.csv(doublet_summary, file.path(OUT_DIR, "doublet_summary_by_sample.csv"), row.names = FALSE)
+cat("  已保存: doublet_summary_by_sample.csv（按样本双细胞检测汇总）\n")
+print(as.data.frame(doublet_summary))                                # 控制台打印汇总表
 
-# 6.1 MAD 离群检测函数（移植自 yijian.R 481-496 行）：
+## ---- 7. 精细过滤（砍上界） ----
+
+# 7.1 MAD 离群检测函数（移植自 yijian.R 481-496 行）：
 #     按 batch（样本）分组，计算中位数 ± nmads×MAD 区间，区间外判为离群。
 #     log=TRUE 时先做 log10(x+1) 转换，更符合计数数据分布。
 is_outlier_mad <- function(x, nmads = 3, type = c("both", "lower", "higher"),
@@ -364,42 +393,35 @@ is_outlier_mad <- function(x, nmads = 3, type = c("both", "lower", "higher"),
   flag                                                                 # 返回逻辑向量
 }
 
-# 6.2 按 QC_MODE 生成各"丢弃原因"的分层标记列（便于追溯每个细胞为何被过滤）
-cat(sprintf("\n==== 6. 过滤判定（模式: %s）====\n", QC_MODE))
+# 7.2 阶段3：连同上界一起砍。在基础过滤后的 merged 上执行，按 QC_MODE 选择固定阈值或 MAD。
+cat(sprintf("\n==== 7. 精细过滤（模式: %s，砍上界 + 剔除双细胞）====\n", QC_MODE))
 if (QC_MODE == "fixed") {
-  # ---- 方案 A：固定阈值（此前 R 管线成功运行的参数，结果可复现对比）----
-  cat("使用固定阈值: nFeature∈[200,6000]、nCount>500、percent.mt<20%\n")
-  obj$discard_low_features <- obj$nFeature_RNA < FIXED_MIN_FEAT | obj$nFeature_RNA > FIXED_MAX_FEAT # 基因数过少或过多
-  obj$discard_low_counts   <- obj$nCount_RNA   < FIXED_MIN_COUNTS                                    # 总计数过少（空液滴/低质量）
-  obj$discard_high_mt      <- obj$percent.mt   > FIXED_MAX_PCT_MT                                     # 线粒体比例过高（受损细胞）
+  # ---- 方案 A：固定阈值两段式（阶段1 已砍下界，此处只砍上界 + singlet）----
+  cat(sprintf("使用固定阈值: nFeature<%d、nCount<%d、percent.mt<%d、且 singlet\n",
+              FIXED_MAX_FEAT, FIXED_MAX_COUNTS, FIXED_MAX_PCT_MT))
+  obj_qc <- subset(merged, subset = scDblFinder.class == "singlet" &
+                      nFeature_RNA < FIXED_MAX_FEAT &
+                      nCount_RNA   < FIXED_MAX_COUNTS &
+                      percent.mt   < FIXED_MAX_PCT_MT)
 } else if (QC_MODE == "mad") {
-  # ---- 方案 B：按样本 3-MAD 自适应（完全对齐 yijian.R run_qc 的判定逻辑）----
+  # ---- 方案 B：按样本 3-MAD 自适应（完全对齐 yijian.R run_qc 的判定逻辑，作用于基础过滤后的 merged）----
   cat(sprintf("使用按样本 3-MAD 自适应（nmads=%d, 基因数硬下限=%d）\n", MAD_NMADS, MAD_MIN_FEAT))
-  obj$discard_low_features <- is_outlier_mad(obj$nFeature_RNA, MAD_NMADS, "lower", log = TRUE, batch = obj$sample) |
-                              obj$nFeature_RNA <= MAD_MIN_FEAT                                        # 基因数显著低于同批样本中位数 或 低于硬下限
-  obj$discard_low_counts   <- is_outlier_mad(obj$nCount_RNA, MAD_NMADS, "lower", log = TRUE, batch = obj$sample) # 总计数显著低于同批样本
-  obj$discard_high_mt      <- is_outlier_mad(obj$percent.mt, MAD_NMADS, "higher", batch = obj$sample) # 线粒体比例显著高于同批样本
+  merged$discard_low_features <- is_outlier_mad(merged$nFeature_RNA, MAD_NMADS, "lower", log = TRUE, batch = merged$sample) |
+                                 merged$nFeature_RNA <= MAD_MIN_FEAT                                        # 基因数显著低于同批样本中位数 或 低于硬下限
+  merged$discard_low_counts   <- is_outlier_mad(merged$nCount_RNA, MAD_NMADS, "lower", log = TRUE, batch = merged$sample) # 总计数显著低于同批样本
+  merged$discard_high_mt      <- is_outlier_mad(merged$percent.mt, MAD_NMADS, "higher", batch = merged$sample) # 线粒体比例显著高于同批样本
+  obj_qc <- subset(merged, subset = scDblFinder.class == "singlet" &
+                      !discard_low_features & !discard_low_counts & !discard_high_mt)
 } else {
   stop("QC_MODE 必须是 'fixed' 或 'mad'，当前为: ", QC_MODE)        # 非法模式直接报错
 }
 
-# 6.3 汇总所有丢弃原因，得到最终过滤标记（任意一个原因成立即丢弃）
-obj$discard <- obj$discard_low_features | obj$discard_low_counts |
-               obj$discard_high_mt | obj$discard_doublet            # 任一条件为 TRUE 即判为低质量
+# 7.3 打印精细过滤的移除统计
+cat(sprintf("精细过滤：%d -> %d 个细胞（移除 %d，%.2f%%）\n",
+            ncol(merged), ncol(obj_qc), ncol(merged) - ncol(obj_qc),
+            100 * (ncol(merged) - ncol(obj_qc)) / ncol(merged)))
 
-# 6.4 打印各原因的丢弃细胞数，便于评估过滤合理性
-# 注意：列名使用英文（避免中文标识符在不同编码环境下解析失败）
-cat("各过滤原因丢弃的细胞数：\n")
-print(data.frame(
-  reason      = c("low_features", "low_counts", "high_mt", "doublet", "total"), # 原因（中文注释：低基因数/低总计数/高线粒体/双细胞/总计）
-  n_discarded = c(sum(obj$discard_low_features), sum(obj$discard_low_counts),    # 对应各原因的丢弃细胞数
-                  sum(obj$discard_high_mt), sum(obj$discard_doublet), sum(obj$discard)),
-  row.names   = NULL
-))
-cat(sprintf("总体：过滤前 %d 个细胞，将丢弃 %d 个（%.2f%%），保留 %d 个。\n",
-            ncol(obj), sum(obj$discard), 100 * mean(obj$discard), sum(!obj$discard)))
-
-## ---- 7. 绘制 QC 图（过滤前后对比） ----
+## ---- 8. 绘制 QC 图（过滤前后对比） ----
 
 # 通用保存 PDF 函数：把 ggplot 对象 p 输出到 OUT_DIR 下的 file，尺寸 w×h 英寸
 save_pdf <- function(p, file, w, h) {
@@ -409,8 +431,8 @@ save_pdf <- function(p, file, w, h) {
   cat(sprintf("  已保存图表: %s\n", file))                           # 提示保存成功
 }
 
-# 7.1 过滤前小提琴图：展示 5 个指标在各样本中的分布（pt.size=0 表示不画散点，加快绘制）
-cat("\n==== 7. 绘制 QC 图 ====\n")
+# 8.1 过滤前小提琴图：展示 5 个指标在各样本中的分布（pt.size=0 表示不画散点，加快绘制）
+cat("\n==== 8. 绘制 QC 图 ====\n")
 p_vln_before <- VlnPlot(obj,
   features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.ribo", "percent.hb"), # 5 个指标
   group.by = "sample",                          # 按样本分面/分组
@@ -419,37 +441,60 @@ p_vln_before <- VlnPlot(obj,
   theme(axis.text.x = element_text(angle = 45, hjust = 1))          # x 轴标签旋转 45° 防重叠
 save_pdf(p_vln_before, "01_QC_violin_before_filter.pdf", 18, 5)
 
-# 7.2 过滤前散点图：总计数 vs 基因数，直观显示低质量细胞分布（左下方聚集）
+# 8.2 过滤前散点图：总计数 vs 基因数，直观显示低质量细胞分布（左下方聚集）
 p_scatter <- FeatureScatter(obj,
   feature1 = "nCount_RNA",                      # x 轴：总 UMI 计数
   feature2 = "nFeature_RNA",                    # y 轴：检测基因数
   group.by = "sample")                          # 按样本着色
 save_pdf(p_scatter, "02_QC_scatter_before_filter.pdf", 8, 6)
 
-## ---- 8. 执行过滤、汇总统计并保存 ----
+## ---- 9. 汇总统计并保存 ----
 
-# 8.1 按 discard 标记过滤掉低质量细胞（subset 只删细胞，不改基因、不改 layer 结构）
-obj_qc <- subset(obj, subset = discard == FALSE)
-cat(sprintf("\n过滤完成：%d 个细胞 -> %d 个细胞（保留 %.2f%%）\n",
-            ncol(obj), ncol(obj_qc), 100 * ncol(obj_qc) / ncol(obj)))
-
-# 8.2 按样本（sample）+ 分组（group）+ 样本编号（sample_id）汇总质控统计量，
-#     输出 yijian.R 风格的 01_QC_summary_by_sample.csv
-qc_summary <- obj@meta.data %>%                  # 基于过滤前的 meta.data 统计
+# 9.1 按样本（sample）+ 分组（group）+ 样本编号（sample_id）汇总质控统计量。
+#     两段式过滤后，分别统计三个阶段的细胞数：
+#       cells_before       = 原始对象 obj 中的细胞数
+#       cells_after_basic  = 基础过滤（砍下界）后的细胞数（merged）
+#       doublet/doublet_pct = 双细胞检测汇总（来自 doublet_summary）
+#       kept               = 精细过滤（砍上界+singlet）后的细胞数（obj_qc）
+qc_summary <- obj@meta.data %>%                  # 基于原始 meta.data 统计（含过滤前中位数）
   dplyr::group_by(sample, group, sample_id) %>%  # 按样本/分组/编号三列分组
   dplyr::summarise(
     cells_before    = dplyr::n(),                # 过滤前细胞数
-    discarded       = sum(discard),              # 丢弃细胞数
-    kept            = sum(!discard),             # 保留细胞数
     median_features = stats::median(nFeature_RNA), # 过滤前中位基因数
     median_counts   = stats::median(nCount_RNA),   # 过滤前中位总计数
     median_mt       = stats::median(percent.mt),   # 过滤前中位线粒体比例(%)
     .groups         = "drop"                     # 取消分组
   )
+
+# 基础过滤后各样本细胞数（merged）
+basic_cnt <- merged@meta.data %>%
+  dplyr::group_by(sample) %>%
+  dplyr::summarise(cells_after_basic = dplyr::n(), .groups = "drop")
+
+# 精细过滤后各样本细胞数（obj_qc）
+kept_cnt <- obj_qc@meta.data %>%
+  dplyr::group_by(sample) %>%
+  dplyr::summarise(kept = dplyr::n(), .groups = "drop")
+
+# 左连接合并三阶段计数与双细胞汇总
+qc_summary <- qc_summary %>%
+  dplyr::left_join(basic_cnt, by = "sample") %>%
+  dplyr::left_join(kept_cnt, by = "sample") %>%
+  dplyr::left_join(dplyr::select(doublet_summary, sample, doublet, doublet_pct), by = "sample")
+
+# 兜底：若某样本在某个阶段被完全过滤掉（计数为 NA），补 0，避免后续统计报错
+qc_summary$cells_after_basic[is.na(qc_summary$cells_after_basic)] <- 0
+qc_summary$kept[is.na(qc_summary$kept)] <- 0
+qc_summary$doublet[is.na(qc_summary$doublet)] <- 0
+qc_summary$doublet_pct[is.na(qc_summary$doublet_pct)] <- 0
+
+# 丢弃细胞数 = 过滤前 - 保留
+qc_summary$discarded <- qc_summary$cells_before - qc_summary$kept
+
 write.csv(qc_summary, file.path(OUT_DIR, "01_QC_summary_by_sample.csv"), row.names = FALSE) # 写汇总表
 cat("  已保存: 01_QC_summary_by_sample.csv\n")
 
-# 8.3 生成长格式的细胞数统计表 cell_count_by_sample.csv（便于绘图/后续分析直接读取）
+# 9.2 生成长格式的细胞数统计表 cell_count_by_sample.csv（便于绘图/后续分析直接读取）
 cell_count_long <- rbind(
   data.frame(sample_id = qc_summary$sample_id, sample = qc_summary$sample,
              group = qc_summary$group, status = "before", count = qc_summary$cells_before,
@@ -461,7 +506,7 @@ cell_count_long <- rbind(
 write.csv(cell_count_long, file.path(OUT_DIR, "cell_count_by_sample.csv"), row.names = FALSE) # 写长格式表
 cat("  已保存: cell_count_by_sample.csv\n")
 
-# 8.4 过滤后小提琴图：仅展示 3 个核心指标，确认过滤后分布更合理
+# 9.3 过滤后小提琴图：仅展示 3 个核心指标，确认过滤后分布更合理
 p_vln_after <- VlnPlot(obj_qc,
   features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), # 3 个核心指标
   group.by = "sample",                          # 按样本分组
@@ -470,7 +515,7 @@ p_vln_after <- VlnPlot(obj_qc,
   theme(axis.text.x = element_text(angle = 45, hjust = 1))      # 旋转标签
 save_pdf(p_vln_after, "03_QC_violin_after_filter.pdf", 14, 5)
 
-# 8.5 过滤前后细胞数柱状图：按样本编号展示 before/after 对比，直观看出各样本过滤比例
+# 9.4 过滤前后细胞数柱状图：按样本编号展示 before/after 对比，直观看出各样本过滤比例
 sample_id_levels <- meta$SampleID               # 用 xlsx 中的原始样本编号顺序作为 x 轴顺序
 cell_count_long$sample_id <- factor(cell_count_long$sample_id, levels = sample_id_levels) # 转因子固定顺序
 p_bar <- ggplot(cell_count_long, aes(x = sample_id, y = count, fill = status)) + # 柱状图
@@ -482,12 +527,12 @@ p_bar <- ggplot(cell_count_long, aes(x = sample_id, y = count, fill = status)) +
        x = "Sample ID", y = "Cell count", fill = "Status")          # 坐标轴与图例标签
 save_pdf(p_bar, "04_QC_cell_count_by_sample.pdf", 14, 6)
 
-# 8.6 保存过滤后的 Seurat 对象（meta.data 完整保留 sample/group/sample_id/percent.*/discard* 等全部信息，
+# 9.5 保存过滤后的 Seurat 对象（meta.data 完整保留 sample/group/sample_id/percent.*/scDblFinder.class 等全部信息，
 #     分组与样本编号的对应关系原样保留，供后续标准化/整合/聚类步骤直接使用）
 saveRDS(obj_qc, file.path(OUT_DIR, "02_seurat_qc.rds"))
 cat(sprintf("  已保存过滤后对象: %s\n", file.path(OUT_DIR, "02_seurat_qc.rds")))
 
-## ---- 9. 完成 ----
+## ---- 10. 完成 ----
 
 # 打印最终结果摘要
 cat("\n==== 质控完成 ====\n")
@@ -498,6 +543,7 @@ cat("\n输出文件清单（位于 output/ 目录）：\n")
 cat("  02_seurat_qc.rds                  - 过滤后的 Seurat 对象\n")
 cat("  01_QC_summary_by_sample.csv       - 按样本/分组/编号的质控汇总表\n")
 cat("  cell_count_by_sample.csv          - 过滤前后细胞数长格式表\n")
+cat("  doublet_summary_by_sample.csv     - 按样本双细胞检测汇总表\n")
 cat("  01_QC_violin_before_filter.pdf    - 过滤前 QC 小提琴图\n")
 cat("  02_QC_scatter_before_filter.pdf   - 过滤前计数-基因数散点图\n")
 cat("  03_QC_violin_after_filter.pdf     - 过滤后 QC 小提琴图\n")
