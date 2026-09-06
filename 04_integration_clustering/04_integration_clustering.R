@@ -56,11 +56,11 @@ script_dir <- tryCatch({
 cat(sprintf("脚本目录: %s\n", script_dir))
 
 # ---- 输入/输出路径 ----
-INPUT_RDS <- file.path(script_dir, "..", "03_extract_cd45", "output", "03_CD45_positive.rds") # 第三步 CD45+ 细胞对象
+INPUT_RDS <- "A:/Workbuddy/singlecell/Rversion/02_quality_control/output/02_seurat_qc.rds" # 第二步 QC 后对象（用户指定绝对路径）
 OUT_DIR   <- file.path(script_dir, "output")                                                      # 本步输出目录（自动创建）
 
-EXCLUDE_SAMPLES <- c("ypN07", "ypN011", "ypN012", "ypN013", "ypN014")
-EXCLUDE_BY_COL  <- "sample_id"  # 按 meta.data 中哪一列进行样本剔除（03 产物中为 sample_id）
+#EXCLUDE_SAMPLES <- c("ypN07", "ypN011", "ypN012", "ypN013", "ypN014","ypN08","ypN09",'ypN010','ypN015','ypN.8')
+#EXCLUDE_BY_COL  <- "sample_id"  # 按 meta.data 中哪一列进行样本剔除（03 产物中为 sample_id）
 # ---- 标准化参数 ----
 NFEATURES     <- 2500      # 高变基因（HVG）数量（FindVariableFeatures 的 nfeatures）
 REGRESS_MT    <- TRUE      # ScaleData 是否回归 percent.mt（TRUE 对齐 yijian.R；FALSE 保留线粒体差异）
@@ -87,7 +87,8 @@ TSNE_PERPLEXITY <- 30      # tSNE 困惑度（通常 5~50，越大越全局）
 
 # ---- 去批次（Harmony）参数 ----
 RUN_HARMONY   <- TRUE      # 是否运行 Harmony 去批次（TRUE 为默认推荐）
-HARMONY_BATCH <- "sample"  # 批次变量（以样本为批次；如需按其他列可改）
+HARMONY_BATCH        <- "sample"  # 主批次变量（逐样本去批次；如需按其他列可改）
+HARMONY_BATCH_EXTRA  <- "batch"   # 追加分组维度（样本来源三批次，由 2.7 生成的 batch 列提供）
 HARMONY_THETA <- NULL      # Harmony 批次校正强度 theta；NULL=用默认值(2)。
                            #   如去批次不足（样本仍各自成团），可调大如 5 增强校正。
 PLOT_HARMONY_CONVERGENCE <- TRUE # 是否绘制 Harmony 收敛诊断图（图 10_Harmony_convergence.pdf）；
@@ -169,8 +170,8 @@ options(future.globals.maxSize = 8 * 1024^3)
 # 2.1 检查输入文件是否存在
 if (!file.exists(INPUT_RDS)) stop("找不到输入 rds: ", INPUT_RDS)
 
-# 2.2 读取第三步的 CD45+ 细胞对象（约 8 万细胞，读取需 1~3 分钟）
-cat("正在读取 03_CD45_positive.rds（约需 1~3 分钟）...\n")
+# 2.2 读取第二步 QC 后的对象（约 12.6 万细胞，读取需 1~3 分钟）
+cat("正在读取 02_seurat_qc.rds（约需 1~3 分钟）...\n")
 obj <- readRDS(INPUT_RDS)                          # 读入 Seurat 对象
 cat(sprintf("读入完成：%d 个基因 x %d 个细胞\n", nrow(obj), ncol(obj))) # 打印维度
 cat("分组分布：\n")                                 # 打印分组分布
@@ -195,39 +196,56 @@ if (!"sample" %in% colnames(obj@meta.data)) {      # 输入对象没有 sample �
 }
 cat(sprintf("样本数: %d\n", length(unique(obj$sample)))) # 打印样本数（应为 23）
 
-## ---- 2.6 按指定条件剔除样本（防御性，用户需求专项） ----
-# 输入 03_extract_cd45/initiation/03_CD45_positive.rds 已是剔除 EXCLUDE_SAMPLES
-# （ypN07/ypN011/ypN012/ypN013/ypN014）后的对象。本步骤确保脚本自包含：
-#   1) 若对象中仍含这些样本 → 按 EXCLUDE_BY_COL 列剔除，并打印剔除前后细胞数；
-#   2) 若对象中已无这些样本 → 打印确认信息后继续（不重复误删、不报错中止）；
-#   3) 若剔除列缺失 → 打印警告并跳过（不中断主流程）。
-cat("\n==== 2.6 按指定条件剔除样本 ====\n")
-cat(sprintf("  排除样本列表: %s\n", paste(EXCLUDE_SAMPLES, collapse = ", ")))
-if (!EXCLUDE_BY_COL %in% colnames(obj@meta.data)) {
-  cat(sprintf("  警告: meta.data 中无 %s 列，跳过样本剔除检查（继续运行）。\n", EXCLUDE_BY_COL))
-} else {
-  all_ids <- unique(as.character(obj@meta.data[[EXCLUDE_BY_COL]]))
-  present <- intersect(EXCLUDE_SAMPLES, all_ids)
-  missing <- setdiff(EXCLUDE_SAMPLES, all_ids)
+# ## ---- 2.6 按指定条件剔除样本（防御性，用户需求专项） ----
+# # 输入 03_extract_cd45/initiation/03_CD45_positive.rds 已是剔除 EXCLUDE_SAMPLES
+# # （ypN07/ypN011/ypN012/ypN013/ypN014）后的对象。本步骤确保脚本自包含：
+# #   1) 若对象中仍含这些样本 → 按 EXCLUDE_BY_COL 列剔除，并打印剔除前后细胞数；
+# #   2) 若对象中已无这些样本 → 打印确认信息后继续（不重复误删、不报错中止）；
+# #   3) 若剔除列缺失 → 打印警告并跳过（不中断主流程）。
+# cat("\n==== 2.6 按指定条件剔除样本 ====\n")
+# cat(sprintf("  排除样本列表: %s\n", paste(EXCLUDE_SAMPLES, collapse = ", ")))
+# if (!EXCLUDE_BY_COL %in% colnames(obj@meta.data)) {
+#   cat(sprintf("  警告: meta.data 中无 %s 列，跳过样本剔除检查（继续运行）。\n", EXCLUDE_BY_COL))
+# } else {
+#   all_ids <- unique(as.character(obj@meta.data[[EXCLUDE_BY_COL]]))
+#   present <- intersect(EXCLUDE_SAMPLES, all_ids)
+#   missing <- setdiff(EXCLUDE_SAMPLES, all_ids)
   
-  if (length(present) > 0) {
-    cat(sprintf("  剔除前: %d 个样本 / %d 个细胞\n", length(all_ids), ncol(obj)))
-    cat(sprintf("  剔除样本: %s\n", paste(present, collapse = ", ")))
+#   if (length(present) > 0) {
+#     cat(sprintf("  剔除前: %d 个样本 / %d 个细胞\n", length(all_ids), ncol(obj)))
+#     cat(sprintf("  剔除样本: %s\n", paste(present, collapse = ", ")))
     
-    # 修复：直接使用列名，不要用 obj[[...]]
-    obj <- subset(obj, subset = !(sample_id %in% EXCLUDE_SAMPLES))
+#     # 修复：直接使用列名，不要用 obj[[...]]
+#     obj <- subset(obj, subset = !(sample_id %in% EXCLUDE_SAMPLES))
     
-    n_after <- length(unique(as.character(obj@meta.data[[EXCLUDE_BY_COL]])))
-    cat(sprintf("  剔除后: %d 个样本 / %d 个细胞\n", n_after, ncol(obj)))
-  }
+#     n_after <- length(unique(as.character(obj@meta.data[[EXCLUDE_BY_COL]])))
+#     cat(sprintf("  剔除后: %d 个样本 / %d 个细胞\n", n_after, ncol(obj)))
+#   }
   
-  if (length(missing) > 0 && length(present) == 0) {
-    cat("  （以上样本在 03 exclude 步骤已剔除，符合预期）\n")
-  } else if (length(missing) > 0) {
-    cat(sprintf("  注意: 以下样本不在数据中（可能已在 03 剔除）: %s\n",
-                paste(missing, collapse = ", ")))
-  }
-}
+#   if (length(missing) > 0 && length(present) == 0) {
+#     cat("  （以上样本在 03 exclude 步骤已剔除，符合预期）\n")
+#   } else if (length(missing) > 0) {
+#     cat(sprintf("  注意: 以下样本不在数据中（可能已在 03 剔除）: %s\n",
+#                 paste(missing, collapse = ", ")))
+#   }
+# }
+
+# 2.7 新增批次维度 batch：按样本来源（sample 前缀）把样本归入三个批次
+#   GSE203115_*  → Batch1_GSE203115（GEO 主线数据，3 个文库）
+#   HRR14308xx   → Batch2_HRR14308xx（第二来源，10 个文库）
+#   HRS8495xx    → Batch3_HRS8495xx（第三来源，10 个文库）
+# 该列供 Harmony 追加分组（group.by.vars = sample + batch）与后续按批次分析/可视化使用。
+cat("\n==== 2.7 生成批次维度 batch（按样本来源三批次）====\n")
+obj$batch <- ifelse(grepl("^GSE203115", obj$sample), "Batch1_GSE203115",
+             ifelse(grepl("^HRR",         obj$sample), "Batch2_HRR14308xx",
+                                               "Batch3_HRS8495xx"))
+obj$batch <- factor(obj$batch,                       # 固定水平顺序，保证图例/配色稳定
+                    levels = c("Batch1_GSE203115", "Batch2_HRR14308xx", "Batch3_HRS8495xx"))
+cat("批次分布（细胞数）：\n")
+print(table(obj$batch, useNA = "ifany"))             # 打印三个批次的细胞数
+n_per_batch <- tapply(obj$sample, obj$batch, function(x) length(unique(x))) # 每批次样本数
+cat("各批次包含样本数：\n")
+print(n_per_batch)
 
 
 
@@ -366,16 +384,16 @@ print(round(100 * head(pc_tbl$var_ratio, 5), 2))   # 前 5 PC 方差占比
 # 使相同细胞类型跨样本对齐（同时保留生物学差异）。整合后的嵌入保存在
 # reduction "harmony" 中，供下游 UMAP/聚类使用。
 if (RUN_HARMONY) {                                 # 开启去批次时
-  cat("\n==== 5. Harmony 去批次（批次变量: sample）====\n")
+  cat("\n==== 5. Harmony 去批次（批次变量: sample + batch[样本来源三批次]）====\n")
   harmony_args <- list(                            # 用列表统一管理参数（便于条件追加）
     object = obj,                                  # Seurat 对象
-    group.by.vars = HARMONY_BATCH,                 # 指定批次变量（样本）
+    group.by.vars = c(HARMONY_BATCH_EXTRA, HARMONY_BATCH), # 主批次=逐样本；追加维度=样本来源三批次（2.7 的 batch 列）
     reduction.use = "pca",                         # 基于 PCA 结果整合
     reduction.save = "harmony",                    # 保存为新降维 "harmony"
-    theta = 5,           # 默认 2，增加到 3-5
-    max.iter.harmony = 50,# 增加迭代次数
+    theta = c(3, 1),           # 默认 2，增加到 3-5
+    max.iter = 30,# 增加迭代次数
     sigma = 0.1,                  # 聚类带宽（默认0.1，可尝试0.05-0.2）
-    verbose = F                                # 静默模式
+    verbose = T                                # 静默模式
   )
   if (!is.null(HARMONY_THETA)) {                   # 手动指定了校正强度 theta 时
     harmony_args$theta <- HARMONY_THETA            # 追加 theta 参数（如 5 增强去批次）
@@ -458,6 +476,24 @@ if (RUN_HARMONY && "harmony" %in% names(obj@reductions)) { # 开启了 Harmony �
     labs(title = "After Harmony (Harmony-UMAP)")   # 标题注明已整合
   p_ba <- patchwork::wrap_plots(p_before, p_after, ncol = 2) # 左右并排拼图
   save_pdf(p_ba, "09_Harmony_before_after_UMAP.pdf", 16, 7) # 保存对比图
+}
+
+# ==== 9.8b Harmony 去批次效果对比图（按三个批次/样本来源 batch 分组，新增） ====
+# 与 9.8 同结构，但着色变量改为 2.7 生成的 batch（GSE203115 / HRR14308xx / HRS8495xx 三批次）。
+# 复用 9.8 已生成的 umap.pca 降维，不重复计算；若 9.8 未运行（无 umap.pca）则自动跳过。
+if (RUN_HARMONY && "umap.pca" %in% names(obj@reductions)) { # umap.pca 存在时
+  # 左图：整合前（PCA-UMAP）按三批次着色 —— 预期各批次各自成团（来源批次效应）
+  p_before_grp <- DimPlot(obj, reduction = "umap.pca", group.by = "batch",
+                          label = FALSE) +              # 按批次着色
+    theme_minimal() +                                   # 简洁主题
+    labs(title = "Before Harmony (PCA-UMAP, by batch)") # 标题注明未整合
+  # 右图：整合后（Harmony-UMAP）按三批次着色 —— 预期三批次混合均匀（去批次效果）
+  p_after_grp <- DimPlot(obj, reduction = "umap", group.by = "batch",
+                         label = FALSE) +               # 按批次着色
+    theme_minimal() +                                   # 简洁主题
+    labs(title = "After Harmony (Harmony-UMAP, by batch)") # 标题注明已整合
+  p_ba_grp <- patchwork::wrap_plots(p_before_grp, p_after_grp, ncol = 2) # 左右并排拼图
+  save_pdf(p_ba_grp, "08_Harmony_before_after_UMAP_by_group.pdf", 16, 7) # 保存（新文件名，不覆盖既有输出）
 }
 
 # ==== 9.9 Harmony 收敛诊断图（可选） ====
@@ -574,6 +610,13 @@ p_grp <- DimPlot(obj, reduction = "umap", group.by = "group",
   theme_minimal() +                                # 简洁主题
   labs(title = "UMAP by group")                    # 图标题
 save_pdf(p_grp, "04_UMAP_by_group.pdf", 8, 6)      # 保存
+
+# ==== 9.3b UMAP 按批次着色（样本来源三批次，新增维度）：观察三个来源的分布与混合情况 ====
+p_batch <- DimPlot(obj, reduction = "umap", group.by = "batch",
+                   label = FALSE) +                 # 按批次着色（batch 列由 2.7 生成）
+  theme_minimal() +                                 # 简洁主题
+  labs(title = "UMAP by batch (GSE203115 / HRR14308xx / HRS8495xx)") # 图标题注明三批次
+save_pdf(p_batch, "13_UMAP_by_batch.pdf", 9, 7)    # 保存（新文件名，不覆盖既有输出）
 
 # ==== 9.4 UMAP 按主 cluster 着色（默认分辨率下）：查看聚类结构 ====
 p_clu <- DimPlot(obj, reduction = "umap", group.by = "cluster",
@@ -737,6 +780,8 @@ cat("  10_Harmony_convergence.pdf       - Harmony 收敛诊断图（可选，版
 cat("  11_cluster_top30_markers.csv       - 各 cluster top30 差异基因表\n")
 cat("  11_cluster_top30_marker_dotplot.pdf - 各 cluster top30 marker 点图（超大尺寸）\n")
 cat("  12_celltype_marker_dotplots.pdf  - 各细胞类别经典 marker 点图（按类别逐一，多页 2×2）\n")
+cat("  13_UMAP_by_batch.pdf             - UMAP 按样本来源三批次着色（GSE203115/HRR14308xx/HRS8495xx）\n")
+cat("  08_Harmony_before_after_UMAP_by_group.pdf - Harmony 去批次前后对比（按三批次 batch 分组着色）\n")
 cat("\n04_integration_clustering 完成。\n")
 
 ## ---- 11. 经典免疫 marker 点图（按细胞类别逐一绘制，独立于主流程） ----
@@ -747,7 +792,16 @@ cat("\n04_integration_clustering 完成。\n")
 # x=marker基因、y=聚类簇 的点图（点大小=表达该基因的细胞比例，颜色深浅=平均表达水平），
 # 最后拼接为一个多页 PDF（每页 2×2 = 4 张）。
 
-MARKER_CSV <- file.path(script_dir, "..", "marker", "经典免疫细胞marker表_上皮限定食管癌.csv")
+# marker 表路径：用 dirname(script_dir) 拼绝对路径，避免 ".." + 中文 组合在 Windows 上
+# file.exists 误判为假（本次实测：带 .. 的中文路径 file.exists 返回 FALSE，但绝对路径可正常读取）。
+# 若精确文件不存在，则在 marker 目录下按模式回退搜索，保证可找到。
+marker_dir  <- file.path(dirname(script_dir), "marker")
+MARKER_CSV  <- file.path(marker_dir, "经典免疫细胞marker表_上皮限定食管癌.csv")
+if (!file.exists(MARKER_CSV)) {
+  cand <- list.files(marker_dir, pattern = "经典免疫细胞marker表.*食管癌\\.csv",
+                     full.names = TRUE)
+  if (length(cand) > 0) MARKER_CSV <- cand[1]
+}
 
 if (!file.exists(MARKER_CSV)) {
   warning("未找到 marker 表：", MARKER_CSV, "，跳过第 11 节点图。")
@@ -763,6 +817,12 @@ if (!file.exists(MARKER_CSV)) {
   if (!GENE_COL %in% colnames(marker_tbl)) {
     warning("marker 表中未找到列：", GENE_COL, "，跳过第 11 节点图。")
   } else {
+    # 加载 showtext 并注册黑体，否则 pdf() 无法渲染标题中的中文
+    ensure_pkg("showtext")
+    library(showtext)
+    font_add("SimHei", "C:/Windows/Fonts/simhei.ttf")
+    showtext_auto()
+
     # 按数值顺序给聚类簇排序（避免 0,1,10,11,...,2 的字典序错乱）。
     # 用临时列 cluster_ord，绘图结束后删除，不影响主流程对象。
     cl_lev <- as.character(sort(as.numeric(unique(obj$cluster))))
@@ -783,7 +843,8 @@ if (!file.exists(MARKER_CSV)) {
       title_str <- paste0(marker_tbl[[TYPE_COL]][i], "  ", marker_tbl[[CN_COL]][i])
       p <- DotPlot(obj, features = genes, group.by = "cluster_ord",
                    cols = c("lightgrey", "#E64B35")) +
-        theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        theme(text = element_text(family = "SimHei"),
+              axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
               plot.title   = element_text(size = 10, face = "bold", hjust = 0.5)) +
         xlab("") + ylab("Cluster") + ggtitle(title_str)
       plist[[length(plist) + 1]] <- p
